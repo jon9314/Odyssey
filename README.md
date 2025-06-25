@@ -219,3 +219,155 @@ SELF_MOD_APPROVAL_MODE: auto
 However, environment variables typically take precedence with `pydantic-settings`.
 
 ⚠️ **Warning:** The `auto` approval mode is potentially risky as it allows the agent to merge code into its main branch without direct human intervention after validation. While the validation step aims to ensure code quality and safety, it might not catch all issues. **Use `auto` mode with extreme caution, preferably only in isolated test environments or when the validation pipeline is exceptionally robust and trusted.**
+
+## Sandbox Infrastructure for Code Validation
+
+To ensure that proposed code changes are safe and functional before being integrated, Odyssey employs a sandbox system. This system is a critical component of the self-modification pipeline, providing an isolated environment for testing.
+
+### Purpose of the Sandbox
+
+The primary goal of the sandbox is to execute and validate proposed code changes without affecting the running application or the main codebase. It aims to:
+*   **Isolate Execution:** Prevent proposed code from accessing sensitive host resources, secrets, or unintended network locations.
+*   **Verify Functionality:** Confirm that the changes allow the application to build, start, pass health checks, and successfully execute its test suite.
+*   **Provide Feedback:** Capture detailed logs and a clear success/failure signal for each validation attempt, which is then used to decide if a proposal can be approved.
+
+### Core Operations (How it Works)
+
+The current sandbox implementation (`Sandbox` class in `odyssey/agent/sandbox.py`) is primarily Docker-based. The core validation method is `run_validation_in_docker()`:
+
+1.  **Input:** It receives an absolute path to a temporary clone of the repository where the specific proposal's branch has already been checked out, and a unique `proposal_id`.
+2.  **Dockerfile Check:** It first looks for a `Dockerfile` at the root of the provided repository clone. If not found, validation typically fails.
+3.  **Docker Image Build:** It builds a Docker image from this `Dockerfile` using `docker build`. A unique tag is generated for the image (e.g., `odyssey-proposal-<proposal_id>-<random_hex>`). Build logs (stdout, stderr) are captured.
+4.  **Docker Container Run:** The newly built image is run as a new Docker container. This step includes:
+    *   Assigning a unique container name.
+    *   Applying security restrictions:
+        *   `--read-only`: Container's root filesystem is read-only.
+        *   `--cap-drop=ALL`: All Linux capabilities are dropped.
+        *   `--security-opt=no-new-privileges`: Prevents processes from gaining more privileges.
+    *   Applying resource limits (configurable via settings):
+        *   `--memory <limit>`
+        *   `--cpus <limit>` (if specified)
+    *   Configurable network mode (defaulting to "bridge").
+    *   Port mapping: The application's port inside the container (e.g., 8000) is mapped to a specific host port to enable health checks from the host.
+5.  **Application Startup & Health Check:**
+    *   After starting the container, the sandbox attempts to verify that the application within the container has started successfully.
+    *   It does this by making HTTP GET requests to a configurable health check endpoint (e.g., `http://localhost:<host_port>/health`) in a retry loop for a certain duration.
+6.  **Test Execution:**
+    *   If the health check passes, the sandbox executes a configurable test command (e.g., `python -m unittest discover -s ./tests`) inside the running container using `docker exec`.
+    *   The success or failure of the tests is determined by the exit code of this command. Logs (stdout, stderr) from the test execution are captured.
+7.  **Result Aggregation:** The sandbox determines an overall validation success or failure based on the outcomes of the build, container run, health check, and test execution phases.
+8.  **Resource Cleanup:** In a `finally` block (ensuring it runs even if errors occur), the sandbox stops and removes the Docker container, and then removes the Docker image that was built.
+9.  **Output:** The method returns a tuple: `(success: bool, output_log: str)`, where `output_log` contains a detailed transcript of all operations, including Docker command outputs and internal logging messages.
+
+### Integration with the Self-Modification Pipeline
+
+The sandbox is invoked as part of an asynchronous Celery task:
+
+1.  When a code change is proposed (via `POST /api/v1/self-modify/propose`), the `run_sandbox_validation_task` Celery task is triggered.
+2.  This task:
+    *   Creates a fresh clone of the main repository in a temporary directory.
+    *   Checks out the specific `branch_name` associated with the proposal in this temporary clone.
+    *   Instantiates the `Sandbox` class, configuring it with settings from `AppSettings` (e.g., health check endpoint, test command, Docker resource limits).
+    *   Instantiates a `SelfModifier` configured to operate on the temporary clone and equipped with the `Sandbox` instance.
+    *   Calls `local_self_modifier.sandbox_test(repo_clone_path=temp_repo_dir, proposal_id=proposal_id)`.
+    *   The `SelfModifier.sandbox_test()` method directly calls `sandbox_instance.run_validation_in_docker()`.
+3.  The success/failure result and the detailed `output_log` from the sandbox are then used by `run_sandbox_validation_task` to update the proposal's record in `MemoryManager` (setting status to "validation_passed" or "validation_failed" and storing the log in `validation_output`).
+
+### Reviewing Sandbox Logs and Proposal Status
+
+Developers and administrators can review the outcome of sandbox validations:
+
+*   **API Endpoints:**
+    *   `GET /api/v1/self-modify/proposals/{proposal_id}`: Provides the detailed status for a specific proposal. The `status` field will indicate "validation_passed", "validation_failed", "validation_in_progress", etc. The `validation_output` field contains the comprehensive log from the sandbox operations.
+    *   `GET /api/v1/self-modify/proposals`: Lists all proposals, allowing a quick overview of their current statuses.
+*   **Interpreting `validation_output`:** This field is key for debugging failed validations. It includes:
+    *   Logs from the `Sandbox` class itself detailing each step.
+    *   `stdout` and `stderr` from Docker build commands.
+    *   `stdout` and `stderr` from Docker run commands (though often minimal for detached containers).
+    *   Logs from the health check attempts.
+    *   `stdout` and `stderr` from the `docker exec` test command.
+
+### Extending or Modifying the Sandbox
+
+The sandbox system is designed to be adaptable:
+
+*   **Configuration (Easiest Modification):**
+    *   Many sandbox behaviors can be tuned via `AppSettings` (defined in `odyssey/agent/main.py` and configurable via environment variables or `.env` files). These include:
+        *   `SANDBOX_HEALTH_CHECK_ENDPOINT`
+        *   `SANDBOX_APP_PORT_IN_CONTAINER`
+        *   `SANDBOX_HOST_PORT_FOR_HEALTH_CHECK`
+        *   `SANDBOX_DEFAULT_TEST_COMMAND`
+        *   `SANDBOX_DOCKER_MEMORY_LIMIT`
+        *   `SANDBOX_DOCKER_CPU_LIMIT`
+        *   `SANDBOX_DOCKER_NETWORK`
+        *   `SANDBOX_DOCKER_NO_NEW_PRIVILEGES`
+    *   Adjusting these settings is the first approach for customizing validation.
+
+*   **Alternative Sandboxing Technologies:**
+    *   The core sandboxing logic is encapsulated within the `Sandbox` class, primarily in the `run_validation_in_docker()` method.
+    *   To replace Docker with another technology (e.g., Podman, systemd-nspawn, Firecracker, WebAssembly runtimes like Wasmtime/Wasmer if applicable):
+        1.  Modify or replace `Sandbox.run_validation_in_docker()` with a new method implementing the desired technology.
+        2.  Ensure this new method adheres to the same contract: accepting `repo_clone_path` and `proposal_id`, and returning `(success: bool, output_log: str)`.
+        3.  Update `SelfModifier.sandbox_test()` if the method name it calls on the sandbox manager instance changes.
+    *   The rest of the pipeline (Celery task, API) would largely remain unchanged as long as this contract is met.
+
+*   **Customizing Validation Steps:**
+    *   The sequence of operations (build, run, health check, tests) is currently implemented within `Sandbox.run_validation_in_docker()`. To alter this sequence, add new checks (e.g., linting, security scans), or change how health checks or tests are invoked, this method is the primary place for modification.
+
+*   **Test Scripts and Definitions:**
+    *   It's important to remember that the sandbox *provides the environment* for testing; the *actual tests* (e.g., Python unittest files, pytest suites, shell scripts) are part of the codebase of the proposal being validated.
+    *   To change what tests are run, you would modify the test scripts within your project and ensure the `SANDBOX_DEFAULT_TEST_COMMAND` (or a custom command for a specific proposal type if you extend the system) correctly invokes them.
+
+### Developer Usage Example for Sandbox Testing (Conceptual)
+
+While the sandbox is primarily invoked by the automated Celery pipeline, a developer might want to test the sandbox mechanism itself or a specific proposal branch more directly. This typically involves:
+
+1.  Ensuring the `odyssey.agent.Sandbox` class is importable.
+2.  Having a local clone of the repository with the desired branch checked out.
+3.  Writing a small Python script:
+
+    ```python
+    # conceptual_sandbox_test.py
+    from odyssey.agent.sandbox import Sandbox
+    from odyssey.agent.main import AppSettings # To get configurations
+    import os
+    import logging
+
+    logging.basicConfig(level=logging.DEBUG) # See detailed logs
+
+    if __name__ == "__main__":
+        # Load settings to get sandbox configurations
+        settings = AppSettings()
+
+        # Path to your local repo clone where the branch is checked out
+        repo_path = "/path/to/your/cloned/odyssey_proposal_branch"
+        proposal_id_for_test = "dev_test_001"
+
+        # Ensure the path is absolute
+        abs_repo_path = os.path.abspath(repo_path)
+        if not os.path.isdir(abs_repo_path) or not os.path.exists(os.path.join(abs_repo_path, "Dockerfile")):
+            print(f"Error: Path {abs_repo_path} is not a valid directory or does not contain a Dockerfile.")
+            exit(1)
+
+        print(f"Testing sandbox with repo: {abs_repo_path}, proposal_id: {proposal_id_for_test}")
+
+        sandbox = Sandbox(
+            health_check_endpoint=settings.SANDBOX_HEALTH_CHECK_ENDPOINT,
+            app_port_in_container=settings.SANDBOX_APP_PORT_IN_CONTAINER,
+            host_port_for_health_check=settings.SANDBOX_HOST_PORT_FOR_HEALTH_CHECK, # Ensure this port is free on host
+            test_command=settings.SANDBOX_DEFAULT_TEST_COMMAND.split(), # Or provide custom
+            docker_memory_limit=settings.SANDBOX_DOCKER_MEMORY_LIMIT,
+            docker_cpu_limit=settings.SANDBOX_DOCKER_CPU_LIMIT,
+            docker_network=settings.SANDBOX_DOCKER_NETWORK,
+            docker_no_new_privileges=settings.SANDBOX_DOCKER_NO_NEW_PRIVILEGES
+        )
+
+        success, output = sandbox.run_validation_in_docker(abs_repo_path, proposal_id_for_test)
+
+        print("\n--- Sandbox Execution Finished ---")
+        print(f"Overall Success: {success}")
+        print("--- Output Log ---")
+        print(output)
+        print("--- End of Log ---")
+    ```
+This script would allow a developer to run the `run_validation_in_docker` method directly on a specified local path, helping to debug the sandbox logic or test a `Dockerfile` and test setup for a proposal.
