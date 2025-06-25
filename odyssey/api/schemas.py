@@ -143,4 +143,28 @@ class AsyncTaskStatusResponse(BaseModel):
     error: Optional[str] = Field(None, example="ValueError: Division by zero") # Error message if failed
     traceback: Optional[str] = Field(None, description="Full traceback if the task failed.") # For detailed error info
 
+
+# --- Self Modification Schemas ---
+class ProposeChangeRequestSchema(BaseModel):
+    files_content: Dict[str, str] = Field(..., example={"src/main.py": "print('Hello, World!')"})
+    commit_message: str = Field(..., min_length=5, example="feat: Implement new greeting feature")
+    branch_prefix: Optional[str] = Field(None, example="feature")
+
+class ProposalResponseSchema(BaseModel):
+    proposal_id: str = Field(..., example="prop_123xyz")
+    branch_name: str = Field(..., example="feature/prop_123xyz_new_greeting")
+    status: str = Field(..., example="proposed")
+    message: Optional[str] = Field(None, example="Proposal submitted and validation pending.")
+
+class ProposalStatusResponseSchema(OrmBaseModel): # Enable ORM mode for reading from MemoryManager
+    proposal_id: str
+    branch_name: str
+    commit_message: str
+    status: str
+    validation_output: Optional[str] = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+    approved_by: Optional[str] = None
+
+
 # Add more Pydantic models as the API evolves.

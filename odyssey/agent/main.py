@@ -18,6 +18,7 @@ from typing import Optional # For AppState type hints
 from odyssey.agent.memory import MemoryManager
 from odyssey.agent.ollama_client import OllamaClient
 from odyssey.agent.tool_manager import ToolManager
+from odyssey.agent.self_modifier import SelfModifier # Import SelfModifier
 from odyssey.agent.celery_app import celery_app # Import celery_app for DI
 
 # Import API routers
@@ -25,7 +26,8 @@ from odyssey.api.routes import (
     router as api_main_router,
     get_memory_manager as get_memory_manager_dependency,
     get_ollama_client as get_ollama_client_dependency,
-    get_tool_manager as get_tool_manager_dependency
+    get_tool_manager as get_tool_manager_dependency,
+    get_self_modifier as get_self_modifier_dependency # Import SelfModifier dependency
 )
 # Configure basic logging
 # This will be the root logger configuration. Specific module loggers can be retrieved via `logging.getLogger(__name__)`.
@@ -68,6 +70,8 @@ class AppSettings(BaseSettings):
     ntfy_server_url: str = "https://ntfy.sh"
     ntfy_topic: Optional[str] = None
 
+    # SelfModifier settings
+    repo_path: str = "." # Default to current directory, can be overridden by env
 
     # For .env file loading by Pydantic-Settings
     class Config:
@@ -84,6 +88,7 @@ class AppState:
     memory_manager: MemoryManager
     ollama_client: OllamaClient
     tool_manager: ToolManager
+    self_modifier: SelfModifier # Add SelfModifier to AppState
     celery_app_instance: Optional[Any] = None # To hold the celery app for DI
     # ... other components
 
@@ -142,11 +147,17 @@ async def lifespan(app_instance: FastAPI): # Renamed app to app_instance to avoi
 
     # logger.info("Placeholder: Initialize SelfModifier")
     # app_state.self_modifier = SelfModifier()
+    get_tool_manager_dependency.instance = app_state.tool_manager
+
+    # SelfModifier
+    app_state.self_modifier = SelfModifier(repo_path=app_state.settings.repo_path)
+    logger.info(f"SelfModifier initialized for repo path: {app_state.settings.repo_path}")
+    get_self_modifier_dependency.instance = app_state.self_modifier
 
     # logger.info("Placeholder: Initialize Planner")
     # app_state.planner = Planner(llm_client=app_state.ollama_client, ...)
 
-    logger.info("Core components initialized (MemoryManager, OllamaClient, ToolManager with DI, CeleryApp ref active; others placeholder).")
+    logger.info("Core components initialized (MemoryManager, OllamaClient, ToolManager, SelfModifier, CeleryApp ref active; Planner placeholder).")
 
     yield # Application runs after this point
 

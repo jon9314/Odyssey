@@ -177,4 +177,169 @@ def execute_tool_task(self, tool_name: str, tool_args: Dict[str, Any]) -> Any:
             except Exception as e_close:
                 logger.error(f"{log_prefix} Error closing MemoryManager: {e_close}", exc_info=True)
 
+
+@celery_app.task(bind=True, name="odyssey.agent.tasks.validate_proposal_task")
+def validate_proposal_task(self, proposal_id: str, branch_name: str) -> Dict[str, Any]:
+    """
+    (STUB) Simulates validation of a code proposal.
+    In a real scenario, this would involve:
+    1. Checking out the specified branch.
+    2. Running linters, tests, and other quality checks.
+    3. Reporting results.
+    Updates the proposal status in MemoryManager.
+    """
+    task_id = self.request.id
+    log_prefix = f"[CeleryTask:{task_id}:validate_proposal_task -> {proposal_id} ({branch_name})]"
+    logger.info(f"{log_prefix} Started.")
+
+    # Dependency imports inside the task for worker context
+    from odyssey.agent.main import AppSettings
+    from odyssey.agent.memory import MemoryManager
+    # from odyssey.agent.self_modifier import SelfModifier # If needed for checkout
+
+    settings: Optional[AppSettings] = None
+    memory: Optional[MemoryManager] = None
+    # self_modifier_instance: Optional[SelfModifier] = None
+
+    try:
+        settings = AppSettings()
+        memory = MemoryManager(db_path=settings.memory_db_path)
+        # self_modifier_instance = SelfModifier(repo_path=settings.repo_path) # Assuming repo_path is in settings
+
+        logger.info(f"{log_prefix} Simulating proposal validation...")
+        memory.log_proposal_step(
+            proposal_id=proposal_id, branch_name=branch_name, status="validation_in_progress",
+            commit_message=memory.get_proposal_log(proposal_id)['commit_message'] # Get existing commit message
+        )
+
+        # Simulate validation work (e.g., running tests)
+        time.sleep(5) # Simulate some work
+
+        # Simulate a validation outcome (e.g., randomly pass or fail for stub)
+        import random
+        validation_passed = random.choice([True, True, False]) # Higher chance of passing for testing flow
+        validation_output = ""
+
+        if validation_passed:
+            validation_status = "validation_passed"
+            validation_output = "All checks passed. Code quality is good. Tests are green."
+            logger.info(f"{log_prefix} Validation simulation: PASSED. Output: {validation_output}")
+        else:
+            validation_status = "validation_failed"
+            validation_output = "Validation failed: Linter errors found. Unit test 'test_critical_feature' failed."
+            logger.warning(f"{log_prefix} Validation simulation: FAILED. Output: {validation_output}")
+
+        memory.log_proposal_step(
+            proposal_id=proposal_id,
+            branch_name=branch_name,
+            commit_message=memory.get_proposal_log(proposal_id)['commit_message'], # Re-fetch in case it changed
+            status=validation_status,
+            validation_output=validation_output
+        )
+        return {"proposal_id": proposal_id, "status": validation_status, "output": validation_output}
+
+    except Exception as e:
+        logger.error(f"{log_prefix} Task critically failed. Error: {e}", exc_info=True)
+        if memory and proposal_id and branch_name: # Attempt to log failure if possible
+            try:
+                cm = memory.get_proposal_log(proposal_id)['commit_message']
+                memory.log_proposal_step(proposal_id=proposal_id, branch_name=branch_name, status="validation_error",
+                                         commit_message=cm, validation_output=f"Task error: {str(e)}")
+            except Exception as log_e:
+                logger.error(f"{log_prefix} Failed to log validation_error status to memory: {log_e}", exc_info=True)
+        raise
+    finally:
+        if memory:
+            memory.close()
+            logger.debug(f"{log_prefix} MemoryManager closed.")
+
+
+@celery_app.task(bind=True, name="odyssey.agent.tasks.merge_proposal_task")
+def merge_proposal_task(self, proposal_id: str, branch_name: str) -> Dict[str, Any]:
+    """
+    (STUB) Simulates merging an approved code proposal.
+    In a real scenario, this would involve:
+    1. Checking out the target branch (e.g., main/master).
+    2. Merging the feature branch (`branch_name`) into it.
+    3. Handling merge conflicts (or failing if not resolvable automatically).
+    4. Pushing the changes.
+    Updates the proposal status in MemoryManager.
+    """
+    task_id = self.request.id
+    log_prefix = f"[CeleryTask:{task_id}:merge_proposal_task -> {proposal_id} ({branch_name})]"
+    logger.info(f"{log_prefix} Started.")
+
+    from odyssey.agent.main import AppSettings
+    from odyssey.agent.memory import MemoryManager
+    # from odyssey.agent.self_modifier import SelfModifier
+
+    settings: Optional[AppSettings] = None
+    memory: Optional[MemoryManager] = None
+    # self_modifier_instance: Optional[SelfModifier] = None
+
+    try:
+        settings = AppSettings()
+        memory = MemoryManager(db_path=settings.memory_db_path)
+        # self_modifier_instance = SelfModifier(repo_path=settings.repo_path)
+
+        original_proposal = memory.get_proposal_log(proposal_id)
+        if not original_proposal:
+            logger.error(f"{log_prefix} Proposal {proposal_id} not found in memory. Cannot proceed with merge.")
+            raise ValueError(f"Proposal {proposal_id} not found for merge.")
+
+        current_commit_message = original_proposal['commit_message']
+        current_approved_by = original_proposal.get('approved_by')
+
+
+        logger.info(f"{log_prefix} Simulating proposal merge...")
+        memory.log_proposal_step(
+            proposal_id=proposal_id, branch_name=branch_name, status="merge_in_progress",
+            commit_message=current_commit_message, approved_by=current_approved_by,
+            validation_output=original_proposal.get('validation_output')
+        )
+
+        # Simulate merge work
+        time.sleep(3) # Simulate git operations
+
+        # Simulate a merge outcome
+        import random
+        merge_succeeded = random.choice([True, False]) # Simple random for stub
+
+        if merge_succeeded:
+            merge_status = "merged"
+            logger.info(f"{log_prefix} Merge simulation: SUCCEEDED for branch '{branch_name}'.")
+            # In a real scenario, SelfModifier would do the merge and push.
+            # self_modifier_instance.merge_and_push(branch_name, target_branch="main")
+        else:
+            merge_status = "merge_failed"
+            logger.warning(f"{log_prefix} Merge simulation: FAILED for branch '{branch_name}'. Possible conflicts or push errors.")
+            # Additional details about failure could be logged by SelfModifier.
+
+        memory.log_proposal_step(
+            proposal_id=proposal_id,
+            branch_name=branch_name,
+            commit_message=current_commit_message,
+            status=merge_status,
+            approved_by=current_approved_by,
+            validation_output=original_proposal.get('validation_output') # Preserve validation, or add merge output
+        )
+        return {"proposal_id": proposal_id, "status": merge_status, "branch": branch_name}
+
+    except Exception as e:
+        logger.error(f"{log_prefix} Task critically failed. Error: {e}", exc_info=True)
+        if memory and proposal_id and branch_name:
+            try:
+                original_prop_data = memory.get_proposal_log(proposal_id)
+                cm = original_prop_data['commit_message'] if original_prop_data else "N/A"
+                ab = original_prop_data.get('approved_by') if original_prop_data else None
+                vo = original_prop_data.get('validation_output') if original_prop_data else None
+                memory.log_proposal_step(proposal_id=proposal_id, branch_name=branch_name, status="merge_error",
+                                         commit_message=cm, approved_by=ab, validation_output=vo + f" | Merge task error: {str(e)}")
+            except Exception as log_e:
+                logger.error(f"{log_prefix} Failed to log merge_error status to memory: {log_e}", exc_info=True)
+        raise
+    finally:
+        if memory:
+            memory.close()
+            logger.debug(f"{log_prefix} MemoryManager closed.")
 ```
