@@ -437,6 +437,70 @@ for res in results:
 
 This system provides a powerful way for Odyssey to build and utilize a rich, context-aware memory.
 
+## Observability with Langfuse
+
+Odyssey integrates with [Langfuse](https://langfuse.com/) for comprehensive observability, tracing, and debugging of its operations, especially those involving Large Language Models (LLMs) and memory interactions.
+
+### Purpose
+
+Using Langfuse allows developers and operators to:
+*   **Trace Complex Flows:** Understand the sequence of operations within the agent, such as an LLM call followed by memory access and then another LLM call.
+*   **Debug LLM Interactions:** Inspect the exact prompts sent to LLMs, the responses received, model parameters used, and latency.
+*   **Monitor Memory Operations:** Track when and what data is added to or retrieved from structured (SQLite) and semantic (vector store) memory.
+*   **Analyze Self-Modification Pipeline:** Observe the lifecycle of code change proposals, from submission through validation and merging.
+*   **Evaluate Performance:** Use Langfuse's scoring and analytics features to assess the quality and effectiveness of different agent behaviors or LLM prompts over time.
+
+### Setup and Configuration
+
+To enable Langfuse integration, you need to configure the following environment variables (e.g., in your `.env` file):
+
+*   **`LANGFUSE_PUBLIC_KEY`**: Your Langfuse project's Public Key.
+*   **`LANGFUSE_SECRET_KEY`**: Your Langfuse project's Secret Key.
+*   **`LANGFUSE_HOST`**: The URL of your Langfuse server instance.
+    *   For Langfuse Cloud: `https://cloud.langfuse.com`
+    *   For self-hosted Langfuse (e.g., via the project's `docker-compose.yml`): `http://localhost:3000` (this is the default if not set).
+
+If these variables are set, Odyssey's `LangfuseClientWrapper` will be activated upon startup and begin sending data to your Langfuse project. If they are not set, Langfuse integration will be disabled, and the agent will log a message indicating this.
+
+The Odyssey agent version is also passed as the `release` to Langfuse, helping to correlate observations with specific code versions.
+
+### Key Instrumented Operations
+
+Odyssey is instrumented to send traces and events to Langfuse for several key operations:
+
+*   **LLM Calls (`OllamaClient`):**
+    *   Each call to `OllamaClient.ask()` (for text generation) and `OllamaClient.generate_embeddings()` creates a Langfuse trace (or a child generation if part of an existing trace).
+    *   Logged data includes:
+        *   Prompt (and system prompt, if used).
+        *   Response/completion (or an error message).
+        *   Model name requested and model actually used.
+        *   Instance type used (local/remote Ollama).
+        *   Timings (latency).
+        *   Any options passed to Ollama (e.g., temperature).
+        *   Token usage (if available from Ollama's response).
+
+*   **Memory Operations (`MemoryManager`):**
+    *   **Structured Memory:**
+        *   `add_task`: Logs task ID, description.
+        *   `update_task_status`: Logs task ID, new status.
+        *   `add_plan`: Logs plan ID, details preview.
+        *   `log_event` (DB log): Logs internal agent events written to SQLite.
+    *   **Semantic Memory (Vector Store):**
+        *   `add_semantic_memory_event`: Logs document ID, text snippet, metadata.
+        *   `semantic_search`: Logs query snippet, `top_k`, filter, number of results, and ID of the first result.
+    *   **Self-Modification Pipeline:**
+        *   `log_proposal_step`: Logs proposal ID, branch, status, commit message snippet, validation output snippet, and approver for each step in a proposal's lifecycle.
+
+### Viewing Traces in Langfuse
+
+Once configured, you can access your Langfuse instance (Cloud or self-hosted UI) to:
+*   View detailed traces of agent operations.
+*   Filter and search for specific events or generations.
+*   Analyze latencies and token usage.
+*   Add scores and comments to traces for evaluation.
+
+This integration provides deep insights into the agent's internal workings, aiding in development, debugging, and performance monitoring.
+
 #### API Access for Semantic Memory
 
 You can interact with the semantic memory via the following API endpoints:

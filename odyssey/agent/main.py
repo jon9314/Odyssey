@@ -18,8 +18,9 @@ from typing import Optional # For AppState type hints
 from odyssey.agent.memory import MemoryManager
 from odyssey.agent.ollama_client import OllamaClient
 from odyssey.agent.tool_manager import ToolManager
-from odyssey.agent.self_modifier import SelfModifier # Import SelfModifier
-from odyssey.agent.celery_app import celery_app # Import celery_app for DI
+from odyssey.agent.self_modifier import SelfModifier
+from odyssey.agent.celery_app import celery_app
+from odyssey.agent.langfuse_client import LangfuseClientWrapper # Import LangfuseClientWrapper
 
 # Import API routers
 from odyssey.api.routes import (
@@ -100,8 +101,9 @@ class AppState:
     memory_manager: MemoryManager
     ollama_client: OllamaClient
     tool_manager: ToolManager
-    self_modifier: SelfModifier # Add SelfModifier to AppState
-    celery_app_instance: Optional[Any] = None # To hold the celery app for DI
+    self_modifier: SelfModifier
+    langfuse_wrapper: Optional[LangfuseClientWrapper] = None # Add LangfuseClientWrapper to AppState
+    celery_app_instance: Optional[Any] = None
     # ... other components
 
 app_state = AppState() # Global app_state instance
@@ -120,7 +122,13 @@ async def lifespan(app_instance: FastAPI): # Renamed app to app_instance to avoi
 
     # --- Initialize Core Components ---
     # MemoryManager
-    app_state.memory_manager = MemoryManager(db_path=app_state.settings.memory_db_path)
+    app_state.memory_manager = MemoryManager(
+        db_path=app_state.settings.memory_db_path,
+        vector_store_persist_path=app_state.settings.VECTOR_STORE_PERSIST_PATH, # Added previously
+        vector_store_collection_name=app_state.settings.VECTOR_STORE_COLLECTION_NAME, # Added previously
+        embedding_model_name=app_state.settings.EMBEDDING_MODEL_NAME, # Added previously
+        langfuse_wrapper=app_state.langfuse_wrapper # Pass the wrapper
+    )
     logger.info(f"MemoryManager initialized with DB: {app_state.memory_manager.db_path}")
     get_memory_manager_dependency.instance = app_state.memory_manager
 
@@ -129,10 +137,11 @@ async def lifespan(app_instance: FastAPI): # Renamed app to app_instance to avoi
         local_url=app_state.settings.ollama_local_url,
         remote_url=app_state.settings.ollama_remote_url,
         default_model=app_state.settings.ollama_default_model,
-        request_timeout=app_state.settings.ollama_request_timeout
+        request_timeout=app_state.settings.ollama_request_timeout,
+        langfuse_wrapper=app_state.langfuse_wrapper # Pass the wrapper
     )
     logger.info("OllamaClient initialized.")
-    get_ollama_client_dependency.instance = app_state.ollama_client # Make available for API routes
+    get_ollama_client_dependency.instance = app_state.ollama_client
 
     # ToolManager and Plugin Auto-Discovery
     # Pass available core services to ToolManager for potential injection into plugins
@@ -169,15 +178,30 @@ async def lifespan(app_instance: FastAPI): # Renamed app to app_instance to avoi
     # logger.info("Placeholder: Initialize Planner")
     # app_state.planner = Planner(llm_client=app_state.ollama_client, ...)
 
-    logger.info("Core components initialized (MemoryManager, OllamaClient, ToolManager, SelfModifier, CeleryApp ref active; Planner placeholder).")
+    # LangfuseClientWrapper
+    app_state.langfuse_wrapper = LangfuseClientWrapper(
+        public_key=app_state.settings.LANGFUSE_PUBLIC_KEY,
+        secret_key=app_state.settings.LANGFUSE_SECRET_KEY,
+        host=app_state.settings.LANGFUSE_HOST,
+        release=app.version # Associate traces with app version
+    )
+    # Note: OllamaClient and MemoryManager will be updated to accept langfuse_wrapper in their constructors next.
+    # For now, get_ollama_client_dependency.instance.langfuse_wrapper = app_state.langfuse_wrapper (if they had the attr already)
+
+    logger.info("Core components initialized (MemoryManager, OllamaClient, ToolManager, SelfModifier, LangfuseWrapper, CeleryApp ref active; Planner placeholder).")
 
     yield # Application runs after this point
 
     # Code to run on shutdown
     logger.info("Odyssey Agent Backend shutting down...")
     if hasattr(app_state, 'memory_manager') and app_state.memory_manager:
-        app_state.memory_manager.close()
+        app_state.memory_manager.close() # This should also handle closing vector_store if it has a close method
         logger.info("MemoryManager connection closed.")
+
+    if hasattr(app_state, 'langfuse_wrapper') and app_state.langfuse_wrapper:
+        app_state.langfuse_wrapper.shutdown()
+        # logger.info("Langfuse client shut down.") # Wrapper logs this
+
     # No specific close/cleanup needed for OllamaClient or ToolManager as implemented
     logger.info("Shutdown complete.")
 

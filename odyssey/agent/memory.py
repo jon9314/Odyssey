@@ -35,7 +35,7 @@ class MemoryManager:
                  vector_store_collection_name: str = DEFAULT_VECTOR_STORE_COLLECTION,
                  json_backup_path: str = DEFAULT_JSON_BACKUP_PATH,
                  embedding_model_name: str = DEFAULT_EMBEDDING_MODEL,
-                 langfuse_client=None):
+                 langfuse_wrapper: Optional[ActualLangfuseClientWrapper] = None): # Updated to langfuse_wrapper
         """
         Initializes the MemoryManager.
         :param db_path: Path to the SQLite database file.
@@ -43,23 +43,20 @@ class MemoryManager:
         :param vector_store_collection_name: Name of the ChromaDB collection.
         :param json_backup_path: Directory for JSON backups.
         :param embedding_model_name: Name of the sentence transformer model for embeddings.
-        :param langfuse_client: Optional initialized Langfuse client for observability.
+        :param langfuse_wrapper: Optional instance of LangfuseClientWrapper for observability.
         """
         self.db_path = db_path
-        # vector_store_path is now vector_store_persist_path for clarity
         self.json_backup_path = json_backup_path
-        # embedding_model_name is used by ChromaVectorStore
 
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        # ChromaVectorStore will create its persist_directory if it doesn't exist.
         os.makedirs(self.json_backup_path, exist_ok=True)
 
         self.conn = sqlite3.connect(self.db_path)
-        self.conn.row_factory = sqlite3.Row # Access columns by name
+        self.conn.row_factory = sqlite3.Row
         self._create_tables()
 
-        # --- Vector Store Initialization ---
-        self.vector_store: Optional[VectorStoreInterface] = None # Use the interface type hint
+        # Vector Store Initialization
+        self.vector_store: Optional[VectorStoreInterface] = None
         try:
             logger.info(f"Initializing ChromaVectorStore: collection='{vector_store_collection_name}', persist_path='{vector_store_persist_path}', model='{embedding_model_name}'")
             self.vector_store = ChromaVectorStore(
@@ -67,22 +64,23 @@ class MemoryManager:
                 persist_directory=vector_store_persist_path,
                 embedding_model_name=embedding_model_name
             )
-            logger.info(f"ChromaVectorStore initialized successfully. Current collection count: {self.vector_store.get_collection_count()}")
-        except ImportError: # Catch if chromadb or sentence_transformers are missing
-            logger.warning("ChromaDB or SentenceTransformers library not found. Semantic memory features will be unavailable.")
-            self.vector_store = None # Explicitly set to None
-        except Exception as e: # Catch other ChromaDB initialization errors
+            logger.info(f"ChromaVectorStore initialized. Collection count: {self.vector_store.get_collection_count()}")
+        except ImportError:
+            logger.warning("ChromaDB/SentenceTransformers not found. Semantic memory unavailable.")
+            self.vector_store = None
+        except Exception as e:
             logger.error(f"Failed to initialize ChromaVectorStore: {e}", exc_info=True)
-            self.vector_store = None # Explicitly set to None
+            self.vector_store = None
 
-        # --- Langfuse Client ---
-        self.langfuse = langfuse_client
-        if self.langfuse:
-            logger.info("Langfuse client provided and configured.")
+        # Langfuse Client Wrapper
+        self.langfuse_wrapper = langfuse_wrapper # Store the passed wrapper
+        if self.langfuse_wrapper and self.langfuse_wrapper.active:
+            logger.info("Langfuse client wrapper provided and active.")
         else:
-            logger.info("Langfuse client not provided; observability will be limited.")
+            logger.info("Langfuse client wrapper not provided or not active; observability will be limited.")
 
-        logger.info(f"MemoryManager initialized. SQLite DB: {self.db_path}, Vector Store: {self.vector_store_path}, JSON Backup: {self.json_backup_path}")
+        # Updated log message to reflect correct variable for vector store path
+        logger.info(f"MemoryManager initialized. SQLite DB: {self.db_path}, Vector Store Persist Path: {vector_store_persist_path}, JSON Backup: {self.json_backup_path}")
 
     def _create_tables(self):
         """Creates necessary SQLite tables if they don't exist."""
@@ -140,7 +138,12 @@ class MemoryManager:
                 )
                 task_id = cursor.lastrowid
                 logger.info(f"Task added with ID: {task_id}, Description: '{description}'")
-                self.log_to_langfuse({"event_type": "add_task", "task_id": task_id, "description": description})
+                self.log_to_langfuse({
+                    "event_type": "memory_add_task", # More specific event name
+                    "task_id": task_id,
+                    "input": {"description": description, "initial_status": "pending"},
+                    "output": {"task_id": task_id}
+                })
                 return task_id
         except sqlite3.Error as e:
             logger.error(f"SQLite error adding task: {e}")
@@ -175,7 +178,12 @@ class MemoryManager:
                 )
                 if cursor.rowcount > 0:
                     logger.info(f"Task ID {task_id} status updated to '{status}'.")
-                    self.log_to_langfuse({"event_type": "update_task_status", "task_id": task_id, "status": status})
+                    self.log_to_langfuse({
+                        "event_type": "memory_update_task_status",
+                        "task_id": task_id,
+                        "input": {"new_status": status},
+                        "output": {"updated": True}
+                    })
                     return True
                 else:
                     logger.warning(f"Task ID {task_id} not found for status update.")
@@ -196,7 +204,12 @@ class MemoryManager:
                 )
                 plan_id = cursor.lastrowid
                 logger.info(f"Plan added with ID: {plan_id}")
-                self.log_to_langfuse({"event_type": "add_plan", "plan_id": plan_id, "details_preview": details[:100]})
+                self.log_to_langfuse({
+                    "event_type": "memory_add_plan",
+                    "plan_id": plan_id,
+                    "input": {"details_preview": details[:200]}, # Log more preview
+                    "output": {"plan_id": plan_id}
+                })
                 return plan_id
         except sqlite3.Error as e:
             logger.error(f"SQLite error adding plan: {e}")
@@ -235,7 +248,12 @@ class MemoryManager:
                 # Avoid recursive logging if this method itself is logged by the main logger
                 # For this specific DB log, we might not want to log to stdout via logger.info
                 # print(f"DB Log [{level}]: {message} (ID: {log_id})") # Or use a specific DB logger
-                self.log_to_langfuse({"event_type": "agent_log", "level": level, "message": message})
+                self.log_to_langfuse({
+                    "event_type": "memory_db_log_event_written", # Specific name
+                    "log_id": log_id,
+                    "input": {"message": message, "level": level},
+                    "output": {"log_id": log_id}
+                })
                 return log_id
         except sqlite3.Error as e:
             logger.error(f"SQLite error logging event: {e}")
@@ -294,10 +312,18 @@ class MemoryManager:
                 """, (proposal_id, branch_name, commit_message, status,
                       validation_output, now_timestamp, now_timestamp, approved_by))
             logger.info(f"Proposal step logged for ID '{proposal_id}'. Status: {status}, Updated_at: {now_timestamp}")
-            # Log to Langfuse (if integrated)
             self.log_to_langfuse({
-                "event_type": "log_proposal_step", "proposal_id": proposal_id, "status": status,
-                "branch_name": branch_name, "commit_message": commit_message
+                "event_type": "memory_log_proposal_step", # More specific
+                "proposal_id": proposal_id,
+                "input": { # Grouping input parameters for clarity in Langfuse
+                    "branch_name": branch_name,
+                    "commit_message": commit_message,
+                    "status": status,
+                    "validation_output_snippet": validation_output[:100] if validation_output else None,
+                    "approved_by": approved_by
+                },
+                "output": {"updated": True}
+                # "metadata": {"full_validation_output": validation_output } # Could log full output here if needed
             })
             return True
         except sqlite3.Error as e:
@@ -367,7 +393,12 @@ class MemoryManager:
             added_ids = self.vector_store.add_documents([document])
             if added_ids and added_ids[0] == doc_id:
                 logger.info(f"Semantic memory event added with ID: {doc_id}. Text snippet: '{text[:100]}...'")
-                self.log_to_langfuse({"event_type": "add_semantic_event", "doc_id": doc_id, "text_preview": text[:100], "metadata": metadata})
+                self.log_to_langfuse({
+                    "event_type": "memory_add_semantic_event",
+                    "doc_id": doc_id,
+                    "input": {"text_snippet": text[:200], "metadata": metadata, "provided_id": event_id},
+                    "output": {"stored_id": doc_id}
+                })
                 return doc_id
             else:
                 logger.error(f"Failed to add semantic memory event. ID mismatch or no ID returned. Expected {doc_id}, got {added_ids}")
@@ -397,8 +428,11 @@ class MemoryManager:
                 top_k=top_k,
                 metadata_filter=metadata_filter
             )
-            # Log to Langfuse (if integrated) - consider what to log (query, num_results, maybe top result IDs)
-            self.log_to_langfuse({"event_type": "semantic_search", "query": query_text, "top_k": top_k, "num_results": len(results)})
+            self.log_to_langfuse({
+                "event_type": "memory_semantic_search",
+                "input": {"query_text_snippet": query_text[:200], "top_k": top_k, "metadata_filter": metadata_filter},
+                "output": {"num_results": len(results), "first_result_id": results[0]['id'] if results else None}
+            })
             return results
         except Exception as e:
             logger.error(f"Error during semantic search: {e}", exc_info=True)
@@ -423,14 +457,51 @@ class MemoryManager:
         (STUB) Logs an event to Langfuse for observability.
         :param event: A dictionary representing the event to log.
         """
-        # In a real implementation, this would use the self.langfuse client.
-        # Example: self.langfuse.trace(...) or self.langfuse.event(...)
-        logger.info(f"(STUB) Langfuse log event: {json.dumps(event)}")
-        # TODO: Implement actual Langfuse logging using the self.langfuse client.
-        # Ensure the event structure is compatible with Langfuse's expectations.
-        if self.langfuse:
-            # self.langfuse.event(name=event.get("event_type", "generic_agent_event"), input=event) # Example
-            pass
+        Logs an event to Langfuse if the wrapper is active.
+        This replaces the old stub method.
+
+        :param event_data: A dictionary containing data for the Langfuse event.
+                           Should include 'event_type' as a key for the Langfuse event name.
+                           Other keys will be part of the metadata.
+        :param trace_id: Optional Langfuse Trace object or ID to associate with this event.
+        """
+        if self.langfuse_wrapper and self.langfuse_wrapper.active:
+            event_name = event_data.pop("event_type", "memory_manager_event") # Use event_type or a default
+
+            # Separate input/output if present, rest goes to metadata
+            input_data = event_data.pop("input", None)
+            output_data = event_data.pop("output", None)
+
+            # Remaining event_data items are considered metadata
+            metadata = event_data
+
+            # If a specific trace_id (object or string) isn't passed, this event might not be linked
+            # or the LangfuseClientWrapper might create a default trace for it.
+            # For MemoryManager events, it's often good if they are part of a larger operation's trace.
+            # The caller of MemoryManager methods would ideally pass a parent_trace_obj.
+            # For now, if no trace_id is passed, it will create a new trace per event.
+            # This might be too granular; consider how to manage traces for sequences of memory ops.
+            # For now, let's assume trace_id is None if not explicitly passed by instrumented methods.
+            # This means instrumented methods MUST be updated to create/pass traces.
+            # Let's simplify: MemoryManager's internal methods will create their own trace if one isn't implicitly available.
+            # The LangfuseClientWrapper's log_event can handle creating a default trace.
+
+            # For now, the instrumented methods will just call this with event_data.
+            # The trace management (creating a top-level trace for an operation and passing it down)
+            # should ideally happen at a higher level (e.g., in API handlers or Celery tasks).
+            # If MemoryManager methods are called without a parent trace, they will create their own.
+
+            # Let's adjust the wrapper's log_event to take trace_id, and here we might not always have one.
+            # The wrapper will handle creating a trace if trace_id is None.
+            self.langfuse_wrapper.log_event(
+                trace_id=None, # Let wrapper create a trace if no parent context
+                name=event_name,
+                input=input_data,
+                output=output_data,
+                metadata=metadata
+            )
+        # else:
+            # logger.debug(f"Langfuse not active. Event not logged: {event_name}")
 
 
     def close(self):

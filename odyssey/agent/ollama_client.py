@@ -11,6 +11,14 @@ from typing import Optional, List, Dict, Any, Generator, Tuple
 # Use a more specific logger name for this client
 logger = logging.getLogger("odyssey.agent.ollama_client")
 
+# Forward reference for LangfuseClientWrapper type hint
+LangfuseClientWrapper = "LangfuseClientWrapper" # Works if LangfuseClientWrapper is in a separate file
+# If in the same file or complex, from typing import ForwardRef; LangfuseClientWrapper = ForwardRef('LangfuseClientWrapper')
+# However, direct import is better if possible. Let's assume it will be importable from .langfuse_client
+from .langfuse_client import LangfuseClientWrapper as ActualLangfuseClientWrapper # For actual use
+from datetime import datetime # For Langfuse timestamps
+
+
 class OllamaClient:
     """
     A client for interacting with Ollama services.
@@ -21,8 +29,9 @@ class OllamaClient:
     def __init__(self,
                  local_url: str = "http://localhost:11434",
                  remote_url: Optional[str] = None,
-                 default_model: str = "phi3", # Changed default to a smaller common model
-                 request_timeout: int = 120):
+                 default_model: str = "phi3",
+                 request_timeout: int = 120,
+                 langfuse_wrapper: Optional[ActualLangfuseClientWrapper] = None): # Added langfuse_wrapper
         """
         Initializes the OllamaClient.
 
@@ -31,14 +40,16 @@ class OllamaClient:
             remote_url: URL for a remote Ollama instance (e.g., on a LAN GPU server).
             default_model: Default model to use if 'auto' is specified in 'ask'.
             request_timeout: Timeout in seconds for requests to the Ollama API.
+            langfuse_wrapper: Optional instance of LangfuseClientWrapper for observability.
         """
-        if not local_url: # Local URL is mandatory
+        if not local_url:
             raise ValueError("local_url for OllamaClient cannot be None or empty.")
 
         self.local_url = local_url.rstrip('/')
         self.remote_url = remote_url.rstrip('/') if remote_url else None
         self.default_model = default_model
         self.request_timeout = request_timeout
+        self.langfuse_wrapper = langfuse_wrapper # Store the wrapper
 
         self.available_local_models: List[Dict[str, Any]] = self._get_available_models(self.local_url, "local")
         self.available_remote_models: List[Dict[str, Any]] = self._get_available_models(self.remote_url, "remote") if self.remote_url else []
@@ -149,104 +160,165 @@ class OllamaClient:
     def ask(self,
             prompt: str,
             model: str = 'auto',
-            safe: bool = True,
+            safe: bool = True, # prefer_safe_yani_local
             stream: bool = False,
             options: Optional[Dict[str, Any]] = None,
-            system_prompt: Optional[str] = None
-            ) -> Tuple[Optional[str], Optional[str], Any]: # Returns (instance_type, model_used, response_content_or_generator)
+            system_prompt: Optional[str] = None,
+            # Langfuse related parameters
+            parent_trace_obj: Optional[Any] = None,
+            trace_name: Optional[str] = None,
+            trace_metadata: Optional[Dict[str, Any]] = None,
+            trace_tags: Optional[List[str]] = None
+            ) -> Tuple[Optional[str], Optional[str], Any]:
         """
-        Sends a prompt to an Ollama API and gets a response. Routes to local/remote based on `safe` flag.
-
+        Sends a prompt to an Ollama API and gets a response. Integrates Langfuse tracing.
         Args:
             prompt: The user's prompt.
-            model: Model name to use. 'auto' tries the default_model based on routing.
-            safe: If True, prefers local/CPU model. If False, prefers remote/GPU model.
-                  This is a simple routing hint for now.
-            stream: Whether to stream the response. If True, returns a generator in the tuple.
-            options: Additional Ollama options (e.g., temperature, top_p).
-            system_prompt: An optional system message.
-
+            model: Model name to use. 'auto' tries the default_model.
+            safe: If True, prefers local instance.
+            stream: Whether to stream the response.
+            options: Additional Ollama options.
+            system_prompt: Optional system message.
+            parent_trace_obj: Optional parent Langfuse Trace object to link this generation.
+            trace_name: Name for this Langfuse generation or new trace. If None, a default is used.
+            trace_metadata: Additional metadata for Langfuse.
+            trace_tags: Tags for Langfuse.
         Returns:
-            A tuple: (instance_type_used: Optional[str], model_used: Optional[str], response: Any)
-            - instance_type_used: 'local', 'remote', or None if error before selection.
-            - model_used: Actual model name used, or None if error.
-            - response: The model's response text (str) or a response generator if stream=True.
-                        If an error occurs during the request, this will be an error message string.
+            A tuple: (instance_type_used, model_used, response_content_or_generator)
         """
+        start_time = datetime.utcnow()
+
+        # Prepare combined metadata for Langfuse
+        # This metadata will be associated with the Langfuse generation or trace.
+        _trace_metadata = {
+            "component": "OllamaClient", "method": "ask", "requested_model": model,
+            "safe_param": safe, "is_stream_request": stream,
+        }
+        if options: _trace_metadata["ollama_options"] = options
+        if system_prompt: _trace_metadata["system_prompt_used"] = bool(system_prompt)
+        if trace_metadata: _trace_metadata.update(trace_metadata) # Merge caller's metadata
+
+        # Determine prompt structure for Langfuse logging (handles system prompts)
+        langfuse_prompt_input = prompt
+        if system_prompt:
+            langfuse_prompt_input = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
 
         instance_url, actual_model, instance_type = self._choose_instance_and_model(model, prefer_safe_yani_local=safe)
 
+        # Update metadata with chosen instance/model
+        _trace_metadata["instance_type_chosen"] = instance_type
+        _trace_metadata["actual_model_chosen"] = actual_model
+
+        response_for_langfuse = None # Actual text or "[Streaming Response]"
+        error_for_langfuse = None    # Error message string for Langfuse status_message
+        usage_for_langfuse = None    # For prompt_tokens, completion_tokens
+        final_response_tuple: Tuple[Optional[str], Optional[str], Any] # What this 'ask' method returns
+
         if not instance_url or not actual_model:
-            error_msg = f"Error: Could not find a suitable Ollama instance or model for request (model='{model}', safe='{safe}')."
+            error_msg = f"Error: Could not find suitable Ollama instance/model (model='{model}', safe='{safe}')."
             logger.error(error_msg)
-            return None, None, error_msg
+            error_for_langfuse = error_msg
+            final_response_tuple = None, None, error_msg
+        else:
+            api_endpoint = f"{instance_url}/api/generate"
+            payload = {"model": actual_model, "prompt": prompt, "stream": stream}
+            if options: payload["options"] = options
+            if system_prompt: payload["system"] = system_prompt
 
-        api_endpoint = f"{instance_url}/api/generate"
+            log_prompt_snippet = prompt[:100] + "..." if len(prompt) > 100 else prompt
+            logger.info(f"Sending prompt to Ollama '{instance_type}' ({actual_model}). Snippet: '{log_prompt_snippet}'")
 
-        payload = {
-            "model": actual_model,
-            "prompt": prompt,
-            "stream": stream,
-        }
-        if options:
-            payload["options"] = options
-        if system_prompt:
-            payload["system"] = system_prompt
+            try:
+                http_response = requests.post(
+                    api_endpoint, data=json.dumps(payload), headers={"Content-Type": "application/json"},
+                    stream=stream, timeout=self.request_timeout
+                )
+                http_response.raise_for_status()
 
-        payload = {
-            "model": actual_model,
-            "prompt": prompt,
-            "stream": stream,
-        }
-        if options:
-            payload["options"] = options
-        if system_prompt:
-            payload["system"] = system_prompt
+                if stream:
+                    logger.debug(f"Streaming response from {instance_type} ({actual_model}).")
+                    response_for_langfuse = "[Streaming Response]" # Langfuse doesn't ingest generators directly for 'completion'
+                    final_response_tuple = instance_type, actual_model, self._stream_response_generator(http_response)
+                else: # Non-streaming
+                    response_data = http_response.json()
+                    full_response = response_data.get("response", "")
+                    response_for_langfuse = full_response
+                    # Extract usage if available from Ollama's response
+                    prompt_tokens = response_data.get("prompt_eval_count")
+                    completion_tokens = response_data.get("eval_count") # 'eval_count' is often the completion tokens
+                    if prompt_tokens is not None and completion_tokens is not None:
+                        usage_for_langfuse = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
+                    else: # Fallback if specific keys aren't there, Ollama's output varies
+                        usage_for_langfuse = {"input_tokens": response_data.get("prompt_eval_count", 0),
+                                              "output_tokens": response_data.get("eval_count", 0)}
 
-        # The 'safe' parameter is used in _choose_instance_and_model to prefer local.
-        # Further safety logic (e.g., prompt modification) could be added here if needed.
-        # For now, 'safe' primarily influences routing.
 
-        log_prompt = prompt[:100] + "..." if len(prompt) > 100 else prompt # Log snippet
-        logger.info(f"Sending prompt to Ollama instance: '{instance_type}' ({instance_url}), Model: '{actual_model}'. Prompt snippet: '{log_prompt}'")
+                    logger.info(f"Received non-streamed response from {instance_type} ({actual_model}). Length: {len(full_response)}. Snippet: {full_response[:100] + '...' if len(full_response) > 100 else full_response}")
+                    final_response_tuple = instance_type, actual_model, full_response
 
-        try:
-            response = requests.post(
-                api_endpoint,
-                data=json.dumps(payload),
-                headers={"Content-Type": "application/json"},
-                stream=stream,
-                timeout=self.request_timeout
-            )
-            response.raise_for_status() # Raises HTTPError for bad responses (4XX or 5XX)
+            except requests.exceptions.Timeout:
+                error_msg = f"Timeout connecting to Ollama ({instance_type} at {api_endpoint}) after {self.request_timeout}s."
+                logger.error(error_msg)
+                error_for_langfuse = error_msg
+                final_response_tuple = instance_type, actual_model, error_msg
+            except requests.exceptions.RequestException as e_req:
+                error_msg = f"Request error connecting to Ollama ({instance_type} at {api_endpoint}): {e_req}"
+                logger.error(error_msg)
+                error_for_langfuse = error_msg
+                final_response_tuple = instance_type, actual_model, error_msg
+            except json.JSONDecodeError:
+                error_msg = f"Could not decode JSON response from Ollama ({instance_type} at {api_endpoint})."
+                logger.error(error_msg)
+                error_for_langfuse = error_msg
+                final_response_tuple = instance_type, actual_model, error_msg
+            except Exception as e_unexpected:
+                error_msg = f"An unexpected error occurred ({instance_type} at {api_endpoint}): {e_unexpected}"
+                logger.error(error_msg, exc_info=True)
+                error_for_langfuse = error_msg
+                final_response_tuple = instance_type, actual_model, error_msg
 
-            if stream:
-                # Return the generator directly, it will be consumed by the caller
-                logger.debug(f"Streaming response from {instance_type} ({actual_model}).")
-                return instance_type, actual_model, self._stream_response_generator(response)
-            else:
-                # Non-streaming response handling
-                response_data = response.json()
-                full_response = response_data.get("response", "") # Default to empty string if no response field
-                logger.info(f"Received non-streamed response from {instance_type} ({actual_model}). Length: {len(full_response)}. Snippet: {full_response[:100] + '...' if len(full_response) > 100 else full_response}")
-                return instance_type, actual_model, full_response
+        end_time = datetime.utcnow()
 
-        except requests.exceptions.Timeout:
-            error_msg = f"Timeout connecting to Ollama ({instance_type} at {api_endpoint}) after {self.request_timeout}s."
-            logger.error(error_msg)
-            return instance_type, actual_model, error_msg # Return instance and model even on error for context
-        except requests.exceptions.RequestException as e:
-            error_msg = f"Request error connecting to Ollama ({instance_type} at {api_endpoint}): {e}"
-            logger.error(error_msg)
-            return instance_type, actual_model, error_msg
-        except json.JSONDecodeError:
-            error_msg = f"Could not decode JSON response from Ollama ({instance_type} at {api_endpoint})."
-            logger.error(error_msg)
-            return instance_type, actual_model, error_msg
-        except Exception as e: # Catch any other unexpected errors
-            error_msg = f"An unexpected error occurred while communicating with Ollama ({instance_type} at {api_endpoint}): {e}"
-            logger.error(error_msg, exc_info=True)
-            return instance_type, actual_model, error_msg
+        if self.langfuse_wrapper and self.langfuse_wrapper.active:
+            effective_trace_name = trace_name or "OllamaClient.ask.DefaultGeneration"
+
+            # If a parent trace object is provided, log this generation as its child
+            if parent_trace_obj and hasattr(parent_trace_obj, 'generation'):
+                parent_trace_obj.generation(
+                    name=effective_trace_name,
+                    prompt=langfuse_prompt_input,
+                    completion=response_for_langfuse if not error_for_langfuse else None,
+                    model=actual_model or model, # Best guess
+                    usage=usage_for_langfuse,
+                    metadata=_trace_metadata,
+                    start_time=start_time,
+                    end_time=end_time,
+                    level="ERROR" if error_for_langfuse else "DEFAULT",
+                    status_message=error_for_langfuse
+                )
+            else: # No parent_trace_obj, create a new trace for this generation
+                # Use trace_name for the trace itself, and a generic name for the generation step
+                trace = self.langfuse_wrapper.client.trace(
+                    name=trace_name or "OllamaClient.ask.StandaloneTrace",
+                    metadata=_trace_metadata, # Attach all metadata to the trace
+                    tags=trace_tags or ["llm_call", "ollama_ask"]
+                )
+                trace.generation(
+                    name="generation", # Name of the step within this trace
+                    prompt=langfuse_prompt_input,
+                    completion=response_for_langfuse if not error_for_langfuse else None,
+                    model=actual_model or model,
+                    usage=usage_for_langfuse,
+                    # metadata is already on the trace, can add more specific to generation if needed
+                    start_time=start_time,
+                    end_time=end_time,
+                    level="ERROR" if error_for_langfuse else "DEFAULT",
+                    status_message=error_for_langfuse
+                )
+                if error_for_langfuse: # Update the trace status if an error occurred
+                    trace.update(status_message=f"Failed: {error_for_langfuse[:200]}", level="ERROR")
+
+        return final_response_tuple
 
     def _stream_response_generator(self, response: requests.Response) -> Generator[str, None, None]:
         """
@@ -271,10 +343,15 @@ class OllamaClient:
     def generate_embeddings(self,
                             text: str,
                             model: str = 'auto',
-                            prefer_safe_yani_local: bool = True # Matches 'safe' param name in ask() for consistency
+                            prefer_safe_yani_local: bool = True,
+                            # Langfuse related parameters
+                            parent_trace_obj: Optional[Any] = None,
+                            trace_name: Optional[str] = None,
+                            trace_metadata: Optional[Dict[str, Any]] = None,
+                            trace_tags: Optional[List[str]] = None
                            ) -> Optional[List[float]]:
         """
-        Generates embeddings for a given text using a specified Ollama model.
+        Generates embeddings for a given text using a specified Ollama model. Integrates Langfuse tracing.
 
         Args:
             text: The text to generate embeddings for.
@@ -288,26 +365,37 @@ class OllamaClient:
         # Some models might be better suited for embeddings than others.
         # If 'auto' is used, we might want to prioritize models known for good embeddings if default_model isn't one.
         # For now, it uses the same model selection logic as ask().
+        start_time = datetime.utcnow()
+
+        _trace_metadata = {
+            "component": "OllamaClient", "method": "generate_embeddings", "requested_model": model,
+            "prefer_safe_yani_local": prefer_safe_yani_local, "text_length": len(text)
+        }
+        if trace_metadata: _trace_metadata.update(trace_metadata)
 
         instance_url, actual_model, instance_type = self._choose_instance_and_model(
             model, prefer_safe_yani_local=prefer_safe_yani_local
         )
+        _trace_metadata["instance_type_chosen"] = instance_type
+        _trace_metadata["actual_model_chosen"] = actual_model
+
+        embedding_result_for_langfuse = None
+        error_for_langfuse = None
+        final_embedding_output: Optional[List[float]] = None
+
 
         if not instance_url or not actual_model:
-            error_msg = f"Error: Could not find a suitable Ollama instance or model for embedding (model='{model}', safe='{prefer_safe_yani_local}')."
+            error_msg = f"Error: Could not find suitable Ollama instance/model for embedding (model='{model}', safe='{prefer_safe_yani_local}')."
             logger.error(error_msg)
-            return None
+            error_for_langfuse = error_msg
+            final_embedding_output = None
+        else:
+            api_endpoint = f"{instance_url}/api/embeddings"
+            payload = { "model": actual_model, "prompt": text }
+            logger.info(f"Generating embeddings via Ollama '{instance_type}' ({actual_model}). Text snippet: '{text[:100]}...'")
 
-        api_endpoint = f"{instance_url}/api/embeddings"
-        payload = {
-            "model": actual_model,
-            "prompt": text, # Ollama's API uses 'prompt' for the text to embed for this endpoint
-        }
-
-        logger.info(f"Generating embeddings via Ollama instance: '{instance_type}' ({instance_url}), Model: '{actual_model}'. Text snippet: '{text[:100]}...'")
-
-        try:
-            response = requests.post(
+            try:
+                response = requests.post(
                 api_endpoint,
                 data=json.dumps(payload),
                 headers={"Content-Type": "application/json"},
@@ -315,27 +403,83 @@ class OllamaClient:
             )
             response.raise_for_status()
             response_data = response.json()
-            embedding = response_data.get("embedding")
+            embedding_data = response_data.get("embedding")
 
-            if isinstance(embedding, list) and all(isinstance(x, (float, int)) for x in embedding):
-                logger.info(f"Successfully generated embedding from {instance_type} ({actual_model}). Embedding dim: {len(embedding)}")
-                return [float(x) for x in embedding] # Ensure all are floats
+            if isinstance(embedding_data, list) and all(isinstance(x, (float, int)) for x in embedding_data):
+                logger.info(f"Successfully generated embedding from {instance_type} ({actual_model}). Embedding dim: {len(embedding_data)}")
+                final_embedding_output = [float(x) for x in embedding_data]
+                embedding_result_for_langfuse = {"dimension": len(final_embedding_output), "first_3_values": final_embedding_output[:3]}
             else:
-                logger.error(f"Unexpected embedding format from Ollama ({instance_type}, {actual_model}). Response: {response_data}")
-                return None
+                error_msg = f"Unexpected embedding format from Ollama ({instance_type}, {actual_model}). Response: {response_data}"
+                logger.error(error_msg)
+                error_for_langfuse = error_msg
+                final_embedding_output = None
 
         except requests.exceptions.Timeout:
-            logger.error(f"Timeout connecting to Ollama for embeddings ({instance_type} at {api_endpoint}) after {self.request_timeout}s.")
-            return None
+            error_msg = f"Timeout for embeddings ({instance_type} at {api_endpoint}) after {self.request_timeout}s."
+            logger.error(error_msg)
+            error_for_langfuse = error_msg
+            final_embedding_output = None
         except requests.exceptions.RequestException as e:
-            logger.error(f"Request error for embeddings from Ollama ({instance_type} at {api_endpoint}): {e}")
-            return None
+            error_msg = f"Request error for embeddings ({instance_type} at {api_endpoint}): {e}"
+            logger.error(error_msg)
+            error_for_langfuse = error_msg
+            final_embedding_output = None
         except json.JSONDecodeError:
-            logger.error(f"Could not decode JSON response for embeddings from Ollama ({instance_type} at {api_endpoint}).")
-            return None
+            error_msg = f"Could not decode JSON for embeddings ({instance_type} at {api_endpoint})."
+            logger.error(error_msg)
+            error_for_langfuse = error_msg
+            final_embedding_output = None
         except Exception as e:
-            logger.error(f"An unexpected error occurred while generating embeddings ({instance_type} at {api_endpoint}): {e}", exc_info=True)
-            return None
+            error_msg = f"Unexpected error generating embeddings ({instance_type} at {api_endpoint}): {e}"
+            logger.error(error_msg, exc_info=True)
+            error_for_langfuse = error_msg
+            final_embedding_output = None
+
+        end_time = datetime.utcnow()
+        if self.langfuse_wrapper and self.langfuse_wrapper.active:
+            effective_trace_name = trace_name or "OllamaClient.generate_embeddings.DefaultGeneration"
+            effective_standalone_trace_name = trace_name or "OllamaClient.generate_embeddings.StandaloneTrace"
+
+            # Langfuse SDK's `generation` typically takes `prompt` and `completion`.
+            # For embeddings, we can use `input` for the text and `output` for the embedding (or its summary).
+            # Or, log it as an "event" if "generation" feels semantically off.
+            # Let's use "generation" but adapt fields. Input = text, Output = embedding summary/status.
+
+            if parent_trace_obj and hasattr(parent_trace_obj, 'generation'):
+                parent_trace_obj.generation(
+                    name=effective_trace_name,
+                    input=text[:1000], # Log a snippet of input text
+                    output=embedding_result_for_langfuse if not error_for_langfuse else None,
+                    model=actual_model or model,
+                    metadata=_trace_metadata,
+                    start_time=start_time,
+                    end_time=end_time,
+                    level="ERROR" if error_for_langfuse else "DEFAULT",
+                    status_message=error_for_langfuse
+                )
+            else:
+                new_trace = self.langfuse_wrapper.client.trace(
+                    name=effective_standalone_trace_name,
+                    metadata=_trace_metadata,
+                    tags=trace_tags or ["embedding_generation", "ollama_embeddings"]
+                )
+                if new_trace:
+                    new_trace.generation( # Using generation here to group model, input, output, metadata
+                        name="embedding_step",
+                        input=text[:1000], # Log a snippet
+                        output=embedding_result_for_langfuse if not error_for_langfuse else None,
+                        model=actual_model or model,
+                        metadata={"is_embedding": True}, # Specific metadata for this step
+                        start_time=start_time,
+                        end_time=end_time,
+                        level="ERROR" if error_for_langfuse else "DEFAULT",
+                        status_message=error_for_langfuse
+                    )
+                    if error_for_langfuse:
+                       new_trace.update(status_message=f"Embedding Failed: {error_for_langfuse[:200]}", level="ERROR")
+
+        return final_embedding_output
 
 
 if __name__ == '__main__':
