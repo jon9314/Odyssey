@@ -34,7 +34,7 @@ class TestMemoryManagerSelfModificationLog(unittest.TestCase):
 
         self.memory = MemoryManager(
             db_path=TEST_DB_PATH,
-            vector_store_path=TEST_VECTOR_STORE_PATH,
+            vector_store_persist_path=TEST_VECTOR_STORE_PATH, # Corrected param name
             json_backup_path=TEST_JSON_BACKUP_PATH
         )
         # Manually ensure the self_modification_log table exists for these tests
@@ -176,7 +176,24 @@ class TestMemoryManagerSelfModificationLog(unittest.TestCase):
         # For this test, we expect it to fail and don't need to re-open here.
         # The tearDown method will attempt to close again, which is fine.
         # Re-initialize for other tests in setUp.
-        self.setUp() # Re-initialize memory manager for next test
+        # self.setUp() # Re-initialize memory manager for next test
+        # Re-creating the memory instance to ensure it's fresh after closing.
+        # This is important because setUp might not be called if tearDown itself fails
+        # or if we want to isolate this re-initialization.
+        # However, standard unittest practice is that setUp IS called before each test.
+        # So, if self.memory.close() works, the next test's self.setUp() will provide a fresh one.
+        # The self.setUp() call here is more of a direct re-initialization for *this specific sequence*
+        # if we didn't want to rely on the next test cycle's setUp.
+        # For robust test isolation, relying on setUp for each test is better.
+        # Let's ensure setUp is indeed creating a new instance.
+        if os.path.exists(TEST_DB_PATH): # Clean up DB file before re-init for this specific test's recovery
+            os.remove(TEST_DB_PATH)
+        self.memory = MemoryManager(
+            db_path=TEST_DB_PATH,
+            vector_store_persist_path=TEST_VECTOR_STORE_PATH, # Use the renamed param
+            json_backup_path=TEST_JSON_BACKUP_PATH
+        )
+
 
     def test_get_proposal_log_db_error(self):
         """Test handling of SQLite errors during get_proposal_log."""
@@ -198,3 +215,106 @@ if __name__ == '__main__':
     # e.g., export PYTHONPATH=$PYTHONPATH:/path/to/your/project/root
     # For simplicity, assume it's runnable via a test runner that handles paths.
     unittest.main()
+
+
+# New test class for semantic memory functionalities
+from unittest.mock import MagicMock, patch
+
+class TestMemoryManagerSemanticMemory(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if os.path.exists(TEST_DB_DIR): # Ensure test dir is clean for this class too
+            shutil.rmtree(TEST_DB_DIR)
+        os.makedirs(TEST_DB_DIR, exist_ok=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        if os.path.exists(TEST_DB_DIR):
+            shutil.rmtree(TEST_DB_DIR)
+
+    def setUp(self):
+        # For these tests, we primarily want to mock the vector_store interaction
+        # We still need a MemoryManager instance, but its vector_store will be a mock.
+        # The actual ChromaVectorStore is tested in test_vector_store.py
+
+        # Patch ChromaVectorStore specifically for MemoryManager's instantiation
+        # This is a bit tricky because MemoryManager instantiates it directly.
+        # A common way is to patch the class in the module where MemoryManager imports it.
+        self.mock_vector_store_instance = MagicMock()
+
+        # We need to ensure that when MemoryManager calls ChromaVectorStore(...),
+        # it gets our mock_vector_store_instance.
+        # The patch should target 'odyssey.agent.memory.ChromaVectorStore'
+        self.patcher = patch('odyssey.agent.memory.ChromaVectorStore', return_value=self.mock_vector_store_instance)
+        self.MockChromaVectorStore = self.patcher.start()
+
+        self.memory = MemoryManager(
+            db_path=os.path.join(TEST_DB_DIR, "semantic_test_db.sqlite"),
+            vector_store_persist_path=os.path.join(TEST_DB_DIR, "semantic_test_vs_chroma"),
+            json_backup_path=os.path.join(TEST_DB_DIR, "semantic_test_json_backup")
+        )
+        # Crucially, after MemoryManager is initialized, its self.vector_store should be our mock
+        self.assertEqual(self.memory.vector_store, self.mock_vector_store_instance)
+
+
+    def tearDown(self):
+        self.patcher.stop() # Important to stop the patch
+        self.memory.close() # Close SQLite connection
+        # setUpClass and tearDownClass handle the directory cleanup
+
+    def test_add_semantic_memory_event(self):
+        text = "Test semantic event"
+        metadata = {"source": "test"}
+        event_id_prop = "event_001"
+
+        # Configure mock to simulate successful add
+        self.mock_vector_store_instance.add_documents.return_value = [event_id_prop]
+
+        returned_id = self.memory.add_semantic_memory_event(text, metadata, event_id=event_id_prop)
+
+        self.assertEqual(returned_id, event_id_prop)
+        self.mock_vector_store_instance.add_documents.assert_called_once_with(
+            [{"text": text, "metadata": metadata, "id": event_id_prop}]
+        )
+
+    def test_add_semantic_memory_event_no_vector_store(self):
+        self.memory.vector_store = None # Simulate vector store not being available
+        returned_id = self.memory.add_semantic_memory_event("text", {})
+        self.assertIsNone(returned_id)
+
+    def test_semantic_search_success(self):
+        query = "Search for similar items"
+        top_k = 3
+        mock_filter = {"type": "test_filter"}
+        expected_results = [
+            {"id": "res1", "text": "Result 1", "metadata": {}, "distance": 0.1},
+            {"id": "res2", "text": "Result 2", "metadata": {}, "distance": 0.2},
+        ]
+        self.mock_vector_store_instance.query_similar_documents.return_value = expected_results
+
+        results = self.memory.semantic_search(query, top_k=top_k, metadata_filter=mock_filter)
+
+        self.assertEqual(results, expected_results)
+        self.mock_vector_store_instance.query_similar_documents.assert_called_once_with(
+            query_text=query, top_k=top_k, metadata_filter=mock_filter
+        )
+
+    def test_semantic_search_no_vector_store(self):
+        self.memory.vector_store = None # Simulate vector store not being available
+        results = self.memory.semantic_search("query")
+        self.assertEqual(len(results), 1)
+        self.assertIn("error", results[0])
+        self.assertIn("Vector store not initialized", results[0]["error"])
+
+    def test_semantic_search_vector_store_error(self):
+        # Simulate an error during the vector store query
+        self.mock_vector_store_instance.query_similar_documents.side_effect = Exception("Vector DB Error")
+
+        results = self.memory.semantic_search("query")
+        self.assertEqual(len(results), 1)
+        self.assertIn("error", results[0])
+        self.assertIn("Vector DB Error", results[0]["error"])
+
+# If running this file directly, ensure both test classes are picked up.
+# This might require adjusting how unittest.main() is called or running tests via a test runner.
+# For now, if __name__ == '__main__': unittest.main() is called, it will run all TestCases in the file.

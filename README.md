@@ -371,3 +371,68 @@ While the sandbox is primarily invoked by the automated Celery pipeline, a devel
         print("--- End of Log ---")
     ```
 This script would allow a developer to run the `run_validation_in_docker` method directly on a specified local path, helping to debug the sandbox logic or test a `Dockerfile` and test setup for a proposal.
+
+## Semantic Memory (Vector Store)
+
+Beyond its structured SQLite memory, Odyssey incorporates a semantic memory system powered by a vector store. This allows the agent to store textual information (like events, logs, observations, or document chunks) and retrieve it based on semantic similarity rather than exact keyword matches.
+
+### Purpose
+
+*   **Long-term Associative Memory:** Enables the agent to recall relevant past experiences or information even if the query uses different wording.
+*   **Contextual Understanding:** Provides richer context for decision-making by finding semantically related information.
+*   **Knowledge Base:** Can be used to build and query a knowledge base from various text sources.
+
+### Current Implementation: ChromaDB
+
+*   **Backend:** The current implementation uses [ChromaDB](https://www.trychroma.com/) as the vector database.
+*   **Embeddings:** Text is converted into numerical embeddings (vectors) using a Sentence Transformer model (default: `all-MiniLM-L6-v2`). These embeddings capture the semantic meaning of the text.
+*   **Persistence:** ChromaDB is configured to persist its data on disk (default path: `var/memory/vector_store_chroma/`), so semantic memories are retained across agent restarts.
+*   **Interface:** A `VectorStoreInterface` (`odyssey/agent/vector_store.py`) defines the standard operations, with `ChromaVectorStore` being the concrete implementation.
+
+### Integration with MemoryManager
+
+The `MemoryManager` (`odyssey/agent/memory.py`) handles interactions with the vector store:
+
+*   **Initialization:** `MemoryManager` initializes the `ChromaVectorStore` during its setup. Configuration parameters like the persistence path, collection name, and embedding model name can be adjusted in `AppSettings` (see `odyssey/agent/main.py`).
+*   **Adding Semantic Data:**
+    *   Use `MemoryManager.add_semantic_memory_event(text: str, metadata: dict, event_id: Optional[str] = None)`
+    *   This method takes a string of text, a dictionary of metadata (e.g., `{"source": "log", "type": "error"}`), and an optional unique ID. It then adds this information to the vector store.
+*   **Querying Semantic Data:**
+    *   Use `MemoryManager.semantic_search(query_text: str, top_k: int = 5, metadata_filter: Optional[Dict[str, Any]] = None)`
+    *   This method takes a query string, the desired number of results (`top_k`), and an optional metadata filter (e.g., `{"source": "log"}`).
+    *   It returns a list of the most semantically similar documents, including their original text, metadata, ID, and distance (similarity score).
+
+### Setup and Dependencies
+
+1.  **Installation:** The necessary Python libraries are `chromadb` and `sentence-transformers`. These should be included in `odyssey/requirements.txt`. If you set up the project following the main instructions, these will be installed.
+    ```bash
+    pip install chromadb sentence-transformers
+    ```
+2.  **Configuration (Optional):**
+    *   The default persistence path for ChromaDB is `var/memory/vector_store_chroma/`.
+    *   The default embedding model is `all-MiniLM-L6-v2`.
+    *   These can be changed via environment variables corresponding to `AppSettings` in `odyssey/agent/main.py`:
+        *   `VECTOR_STORE_PERSIST_PATH`
+        *   `VECTOR_STORE_COLLECTION_NAME`
+        *   `EMBEDDING_MODEL_NAME` (Note: This is the `embedding_model_name` parameter for `MemoryManager` which is then passed to `ChromaVectorStore`).
+
+### Example Usage (Conceptual via MemoryManager)
+
+```python
+# Assuming 'memory' is an initialized MemoryManager instance
+
+# Add an event to semantic memory
+event_text = "The agent learned a new skill: advanced data analysis."
+event_meta = {"category": "skill_acquisition", "timestamp": "2023-11-15T10:00:00Z"}
+event_id = memory.add_semantic_memory_event(text=event_text, metadata=event_meta)
+if event_id:
+    print(f"Added semantic event with ID: {event_id}")
+
+# Perform a semantic search
+query = "What new abilities did the agent gain recently?"
+results = memory.semantic_search(query_text=query, top_k=3)
+for res in results:
+    print(f"Found: {res['text']} (Distance: {res['distance']:.4f}, Metadata: {res['metadata']})")
+```
+
+This system provides a powerful way for Odyssey to build and utilize a rich, context-aware memory.

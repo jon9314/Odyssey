@@ -268,6 +268,75 @@ class OllamaClient:
         finally:
             response.close() # Ensure connection is closed
 
+    def generate_embeddings(self,
+                            text: str,
+                            model: str = 'auto',
+                            prefer_safe_yani_local: bool = True # Matches 'safe' param name in ask() for consistency
+                           ) -> Optional[List[float]]:
+        """
+        Generates embeddings for a given text using a specified Ollama model.
+
+        Args:
+            text: The text to generate embeddings for.
+            model: Model name to use. 'auto' tries the default_model or a known embedding model.
+            prefer_safe_yani_local: If True, prefers local instance. If False, prefers remote.
+
+        Returns:
+            A list of floats representing the embedding, or None if an error occurs.
+        """
+        # Note: Ollama's /api/embeddings usually uses the model's primary modality.
+        # Some models might be better suited for embeddings than others.
+        # If 'auto' is used, we might want to prioritize models known for good embeddings if default_model isn't one.
+        # For now, it uses the same model selection logic as ask().
+
+        instance_url, actual_model, instance_type = self._choose_instance_and_model(
+            model, prefer_safe_yani_local=prefer_safe_yani_local
+        )
+
+        if not instance_url or not actual_model:
+            error_msg = f"Error: Could not find a suitable Ollama instance or model for embedding (model='{model}', safe='{prefer_safe_yani_local}')."
+            logger.error(error_msg)
+            return None
+
+        api_endpoint = f"{instance_url}/api/embeddings"
+        payload = {
+            "model": actual_model,
+            "prompt": text, # Ollama's API uses 'prompt' for the text to embed for this endpoint
+        }
+
+        logger.info(f"Generating embeddings via Ollama instance: '{instance_type}' ({instance_url}), Model: '{actual_model}'. Text snippet: '{text[:100]}...'")
+
+        try:
+            response = requests.post(
+                api_endpoint,
+                data=json.dumps(payload),
+                headers={"Content-Type": "application/json"},
+                timeout=self.request_timeout
+            )
+            response.raise_for_status()
+            response_data = response.json()
+            embedding = response_data.get("embedding")
+
+            if isinstance(embedding, list) and all(isinstance(x, (float, int)) for x in embedding):
+                logger.info(f"Successfully generated embedding from {instance_type} ({actual_model}). Embedding dim: {len(embedding)}")
+                return [float(x) for x in embedding] # Ensure all are floats
+            else:
+                logger.error(f"Unexpected embedding format from Ollama ({instance_type}, {actual_model}). Response: {response_data}")
+                return None
+
+        except requests.exceptions.Timeout:
+            logger.error(f"Timeout connecting to Ollama for embeddings ({instance_type} at {api_endpoint}) after {self.request_timeout}s.")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request error for embeddings from Ollama ({instance_type} at {api_endpoint}): {e}")
+            return None
+        except json.JSONDecodeError:
+            logger.error(f"Could not decode JSON response for embeddings from Ollama ({instance_type} at {api_endpoint}).")
+            return None
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while generating embeddings ({instance_type} at {api_endpoint}): {e}", exc_info=True)
+            return None
+
 
 if __name__ == '__main__':
     # Setup basic logging for the example
@@ -349,5 +418,17 @@ if __name__ == '__main__':
         )
         logger.info(f"Test 5: Instance='{instance5}', Model='{model_used5}'. Response snippet: {str(response5)[:100]}...")
         if "Error:" in str(response5): logger.error(f"Test 5 failed: {response5}")
+
+        logger.info("\n--- Test 6: Generating embeddings ---")
+        # Ensure the model used (e.g., phi3) supports embedding generation.
+        # Some very small models might not, or might produce low-quality embeddings.
+        # Ollama's default behavior for /api/embeddings is to use the specified model.
+        text_to_embed = "This is a test sentence for generating embeddings."
+        embedding = client_to_test.generate_embeddings(text_to_embed, model='phi3', prefer_safe_yani_local=True)
+
+        if embedding:
+            logger.info(f"Test 6: Embedding generated. Type: {type(embedding)}, Dim: {len(embedding)}, First 5 values: {embedding[:5]}")
+        else:
+            logger.error(f"Test 6: Embedding generation failed.")
 
     logger.info("OllamaClient example finished.")

@@ -16,53 +16,64 @@ from typing import List, Dict, Any, Optional
 # from sentence_transformers import SentenceTransformer # Example for embeddings
 # from langfuse import Langfuse # Example
 
+# Import the new vector store components
+from .vector_store import ChromaVectorStore, VectorStoreInterface # Added VectorStoreInterface
+
 logger = logging.getLogger(__name__)
 
 # Default paths (can be overridden by config)
 DEFAULT_DB_PATH = "var/memory/structured_memory.db"
-DEFAULT_VECTOR_STORE_PATH = "var/memory/vector_store" # For ChromaDB or FAISS files
+DEFAULT_VECTOR_STORE_PERSIST_PATH = "var/memory/vector_store_chroma" # Specific for Chroma persistence
+DEFAULT_VECTOR_STORE_COLLECTION = "odyssey_semantic_collection" # Renamed for clarity
 DEFAULT_JSON_BACKUP_PATH = "var/memory/backup/"
+DEFAULT_EMBEDDING_MODEL = 'all-MiniLM-L6-v2' # For Chroma's SentenceTransformer
 
 class MemoryManager:
     def __init__(self,
                  db_path: str = DEFAULT_DB_PATH,
-                 vector_store_path: str = DEFAULT_VECTOR_STORE_PATH,
+                 vector_store_persist_path: str = DEFAULT_VECTOR_STORE_PERSIST_PATH,
+                 vector_store_collection_name: str = DEFAULT_VECTOR_STORE_COLLECTION,
                  json_backup_path: str = DEFAULT_JSON_BACKUP_PATH,
-                 embedding_model_name: str = 'all-MiniLM-L6-v2', # Common default for SentenceTransformer
-                 langfuse_client=None): # Pass initialized Langfuse client
+                 embedding_model_name: str = DEFAULT_EMBEDDING_MODEL,
+                 langfuse_client=None):
         """
         Initializes the MemoryManager.
         :param db_path: Path to the SQLite database file.
-        :param vector_store_path: Path for vector store data (e.g., ChromaDB directory).
+        :param vector_store_persist_path: Path for ChromaDB persistent storage.
+        :param vector_store_collection_name: Name of the ChromaDB collection.
         :param json_backup_path: Directory for JSON backups.
         :param embedding_model_name: Name of the sentence transformer model for embeddings.
         :param langfuse_client: Optional initialized Langfuse client for observability.
         """
         self.db_path = db_path
-        self.vector_store_path = vector_store_path
+        # vector_store_path is now vector_store_persist_path for clarity
         self.json_backup_path = json_backup_path
+        # embedding_model_name is used by ChromaVectorStore
 
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        os.makedirs(self.vector_store_path, exist_ok=True)
+        # ChromaVectorStore will create its persist_directory if it doesn't exist.
         os.makedirs(self.json_backup_path, exist_ok=True)
 
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row # Access columns by name
         self._create_tables()
 
-        # --- Vector Store Initialization (Placeholder) ---
-        # self.embedding_model = SentenceTransformer(embedding_model_name)
-        # self.chroma_client = ChromaClient(path=self.vector_store_path) # Or setup FAISS index
-        # self.vector_collection_name = "events_semantic"
-        # try:
-        #     self.vector_collection = self.chroma_client.get_or_create_collection(name=self.vector_collection_name)
-        # except Exception as e: # Catch specific Chroma/FAISS exceptions
-        #     logger.error(f"Failed to initialize ChromaDB collection '{self.vector_collection_name}': {e}")
-        #     self.vector_collection = None
-        self.embedding_model = None # Placeholder
-        self.vector_collection = None # Placeholder
-        logger.info("Vector store (ChromaDB/FAISS) initialization is currently a placeholder.")
-
+        # --- Vector Store Initialization ---
+        self.vector_store: Optional[VectorStoreInterface] = None # Use the interface type hint
+        try:
+            logger.info(f"Initializing ChromaVectorStore: collection='{vector_store_collection_name}', persist_path='{vector_store_persist_path}', model='{embedding_model_name}'")
+            self.vector_store = ChromaVectorStore(
+                collection_name=vector_store_collection_name,
+                persist_directory=vector_store_persist_path,
+                embedding_model_name=embedding_model_name
+            )
+            logger.info(f"ChromaVectorStore initialized successfully. Current collection count: {self.vector_store.get_collection_count()}")
+        except ImportError: # Catch if chromadb or sentence_transformers are missing
+            logger.warning("ChromaDB or SentenceTransformers library not found. Semantic memory features will be unavailable.")
+            self.vector_store = None # Explicitly set to None
+        except Exception as e: # Catch other ChromaDB initialization errors
+            logger.error(f"Failed to initialize ChromaVectorStore: {e}", exc_info=True)
+            self.vector_store = None # Explicitly set to None
 
         # --- Langfuse Client ---
         self.langfuse = langfuse_client
@@ -335,66 +346,68 @@ class MemoryManager:
             logger.error(f"SQLite error listing proposals: {e}")
             return []
 
-    # --- Stubs for Future Features ---
-    def semantic_search(self, query: str) -> List[Dict[str, Any]]: # Renamed query_text to query
+    # --- Semantic Memory Methods ---
+    def add_semantic_memory_event(self, text: str, metadata: dict, event_id: Optional[str] = None) -> Optional[str]:
         """
-        (STUB) Performs semantic search using a vector store.
-        :param query: The text to search for.
-        :return: A list of search result dictionaries (currently empty).
-        """
-        logger.info(f"(STUB) Semantic search called with query: '{query}'")
-        logger.warning("Semantic search is not implemented yet.")
-        # TODO: Implement actual semantic search with ChromaDB/FAISS and SentenceTransformer.
-        # Example structure of a result item:
-        # { "id": "vector_id_xyz", "document": "Text content...", "score": 0.85, "metadata": {...} }
-            return results
-        except sqlite3.Error as e:
-            logger.error(f"SQLite error during query: {e}")
-            return []
-        except json.JSONDecodeError as e:
-            logger.error(f"Error decoding JSON from query results: {e}")
-            return [] # Or handle partially decoded results
+        Adds a text event and its metadata to the semantic vector store.
 
+        :param text: The text content of the event.
+        :param metadata: A dictionary of metadata associated with the text.
+        :param event_id: Optional unique ID for this event. If None, one will be generated.
+        :return: The ID of the added event, or None if an error occurred or vector store is unavailable.
+        """
+        if not self.vector_store:
+            logger.warning("Vector store not available. Cannot add semantic memory event.")
+            return None
+
+        doc_id = event_id or str(datetime.datetime.utcnow().timestamp()) + "_" + os.urandom(4).hex() # More unique default ID
+        document = {"text": text, "metadata": metadata, "id": doc_id}
+
+        try:
+            added_ids = self.vector_store.add_documents([document])
+            if added_ids and added_ids[0] == doc_id:
+                logger.info(f"Semantic memory event added with ID: {doc_id}. Text snippet: '{text[:100]}...'")
+                self.log_to_langfuse({"event_type": "add_semantic_event", "doc_id": doc_id, "text_preview": text[:100], "metadata": metadata})
+                return doc_id
+            else:
+                logger.error(f"Failed to add semantic memory event. ID mismatch or no ID returned. Expected {doc_id}, got {added_ids}")
+                return None
+        except Exception as e:
+            logger.error(f"Error adding semantic memory event (ID: {doc_id}): {e}", exc_info=True)
+            return None
 
     def semantic_search(self, query_text: str, top_k: int = 5, metadata_filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
-        Performs semantic search using the vector store.
+        Performs semantic search using the configured vector store.
+
         :param query_text: The text to search for.
         :param top_k: Number of top results to return.
-        :param metadata_filter: Optional filter for metadata in the vector store (ChromaDB `where` clause).
-        :return: A list of search results, including document, distance, and metadata.
+        :param metadata_filter: Optional filter for metadata (passed to vector store's `where` clause).
+        :return: A list of search result dictionaries, including text, metadata, id, and distance.
+                 Returns an empty list if vector store is unavailable or an error occurs.
         """
-        logger.info(f"Performing semantic search for: '{query_text}', top_k: {top_k}")
-        if not self.vector_collection or not self.embedding_model:
-            logger.warning("Vector store or embedding model not available for semantic search.")
-            return [{"error": "Semantic search not available."}]
+        if not self.vector_store:
+            logger.warning("Vector store not available. Cannot perform semantic search.")
+            return [{"error": "Semantic search not available / Vector store not initialized."}] # Return error structure
 
-        # try:
-        #     query_embedding = self.embedding_model.encode([query_text])[0].tolist()
-        #     results = self.vector_collection.query(
-        #         query_embeddings=[query_embedding],
-        #         n_results=top_k,
-        #         where=metadata_filter # ChromaDB specific filter
-        #         # include=["documents", "distances", "metadatas"] # Default includes these
-        #     )
-        #     # Process results (ChromaDB returns a specific structure)
-        #     # Example:
-        #     # processed_results = []
-        #     # if results and results.get('ids') and results['ids'][0]:
-        #     #     for i in range(len(results['ids'][0])):
-        #     #         processed_results.append({
-        #     #             "id": results['ids'][0][i],
-        #     #             "document": results['documents'][0][i] if results['documents'] else None,
-        #     #             "distance": results['distances'][0][i] if results['distances'] else None,
-        #     #             "metadata": results['metadatas'][0][i] if results['metadatas'] else None,
-        #     #         })
-        #     # return processed_results
-        #     logger.warning("Semantic search logic is a placeholder.")
-        #     return [{"placeholder_result": "semantic search placeholder", "query": query_text}]
-        # except Exception as e:
-        #     logger.error(f"Error during semantic search: {e}")
-        #     return [{"error": str(e)}]
-        return [] # Return empty list for stub
+        logger.info(f"Performing semantic search for: '{query_text[:100]}...', top_k: {top_k}, filter: {metadata_filter}")
+        try:
+            results = self.vector_store.query_similar_documents(
+                query_text=query_text,
+                top_k=top_k,
+                metadata_filter=metadata_filter
+            )
+            # Log to Langfuse (if integrated) - consider what to log (query, num_results, maybe top result IDs)
+            self.log_to_langfuse({"event_type": "semantic_search", "query": query_text, "top_k": top_k, "num_results": len(results)})
+            return results
+        except Exception as e:
+            logger.error(f"Error during semantic search: {e}", exc_info=True)
+            return [{"error": f"Error during semantic search: {str(e)}"}]
+
+
+    # --- Stubs for Future Features --- (semantic_search was here, now implemented above)
+    # The old semantic_search stub needs to be removed or this new one replaces it.
+    # Assuming this new one replaces it.
 
     def backup_json(self) -> None:
         """
@@ -449,7 +462,8 @@ if __name__ == '__main__':
     # Using 'var/test_memory/' which should be gitignored if var/ is.
     test_base_dir = "var/test_memory"
     example_db_path = os.path.join(test_base_dir, "example_memory.db")
-    example_vector_path = os.path.join(test_base_dir, "example_vector_store")
+    # example_vector_path is now example_vector_persist_path
+    example_vector_persist_path = os.path.join(test_base_dir, "example_vector_store_chroma") # Updated path
     example_backup_path = os.path.join(test_base_dir, "example_json_backups")
 
     # Clean up previous example run files if they exist
@@ -462,9 +476,11 @@ if __name__ == '__main__':
     mock_lf_client = MockLangfuse()
     memory = MemoryManager(
         db_path=example_db_path,
-        vector_store_path=example_vector_path,
+        vector_store_persist_path=example_vector_persist_path, # Updated parameter name
+        # vector_store_collection_name can use default
         json_backup_path=example_backup_path,
-        langfuse_client=mock_lf_client # Pass the mock client
+        # embedding_model_name can use default
+        langfuse_client=mock_lf_client
     )
 
     print("\n--- Task Management ---")
@@ -510,12 +526,43 @@ if __name__ == '__main__':
     for log_entry in error_logs:
         print(f"  ID: {log_entry['id']}, Msg: {log_entry['message']}")
 
+    print("\n--- Semantic Memory ---")
+    if memory.vector_store: # Check if vector_store was initialized
+        event1_id = memory.add_semantic_memory_event(
+            text="The agent successfully completed task #42 regarding data processing.",
+            metadata={"type": "agent_action", "task_id": "42", "status": "success"}
+        )
+        memory.add_semantic_memory_event(
+            text="A critical error occurred in the billing module during an update.",
+            metadata={"type": "system_error", "module": "billing", "severity": "critical"},
+            event_id="error_billing_001" # Provide custom ID
+        )
+        memory.add_semantic_memory_event(
+            text="User 'john_doe' initiated a new project planning session.",
+            metadata={"type": "user_activity", "user": "john_doe", "activity": "planning"}
+        )
 
-    print("\n--- Semantic Search (STUB) ---")
-    semantic_results = memory.semantic_search("Find information about recent errors.")
-    print("Semantic search results:")
-    for res in semantic_results:
-        print(f"  {res}")
+        print(f"Current semantic memory count: {memory.vector_store.get_collection_count()}")
+
+        search_query = "information about data processing tasks"
+        print(f"\nSemantic search for: '{search_query}'")
+        semantic_results = memory.semantic_search(search_query, top_k=2)
+        if semantic_results and "error" not in semantic_results[0]:
+            for res in semantic_results:
+                print(f"  ID: {res.get('id')}, Dist: {res.get('distance', -1):.4f}, Text: '{res.get('text', '')[:60]}...', Meta: {res.get('metadata')}")
+        else:
+            print(f"  Semantic search returned: {semantic_results}")
+
+        search_query_filtered = "billing problems"
+        print(f"\nSemantic search for: '{search_query_filtered}' with filter {{'severity': 'critical'}}")
+        semantic_results_filtered = memory.semantic_search(search_query_filtered, top_k=1, metadata_filter={"severity": "critical"})
+        if semantic_results_filtered and "error" not in semantic_results_filtered[0]:
+            for res in semantic_results_filtered:
+                print(f"  ID: {res.get('id')}, Dist: {res.get('distance', -1):.4f}, Text: '{res.get('text', '')[:60]}...', Meta: {res.get('metadata')}")
+        else:
+            print(f"  Semantic search returned: {semantic_results_filtered}")
+    else:
+        print("  Vector store (ChromaDB) not available, skipping semantic memory example.")
 
 
     print("\n--- JSON Backup ---")
