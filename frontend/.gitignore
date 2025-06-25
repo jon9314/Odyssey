@@ -1,0 +1,29 @@
+# Vite
+dist
+.vite
+
+# Node
+node_modules/
+
+# IDEs & Editors
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Environment files
+.env
+.env*.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json # Often committed, but can be ignored by some teams
+
+# Optional: Operating System Files
+.DS_Store
+Thumbs.db

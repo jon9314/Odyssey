@@ -1,0 +1,161 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+# Virtualenv
+.venv/
+venv/
+ENV/
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# Environments
+.env
+.env.*
+!.env.example # if you have an example env file
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*~
+*.sublime-project
+*.sublime-workspace
+
+# OS-generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Secrets and sensitive configuration
+config/secrets.env # Per project structure, this is the template for .env
+secrets.json
+*.pem
+*.key
+credentials.*
+
+# Log files
+logs/*.log
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Node.js
+node_modules/
+package-lock.json # Usually committed, but can be ignored for library projects
+# yarn.lock # Same as package-lock.json
+
+# Frontend build artifacts
+# Adjust if your frontend framework uses different output directories
+frontend/dist/
+frontend/.next/
+frontend/out/
+frontend/build/
+
+# Odyssey specific
+var/ # For SQLite DBs, vector stores, backups as per settings.yaml
+agent_workspace_test/ # From file_ops.py example
+
+# Data directories for services if not exclusively managed by Docker volumes
+# These are often defined as Docker volumes, but if any part is created locally
+# outside a volume mount or before `docker compose up`, they should be ignored.
+# The `var/` directory is already listed, which is good.
+# Explicitly listing potential subdirectories of var/ if they might be created by direct tool usage:
+var/memory/ # Covers SQLite, vector store, JSON backups from MemoryManager defaults
+var/chroma_data/ # If ChromaDB stores data here and it's not a named volume
+var/langfuse_db_data/ # If Langfuse DB stores data here and it's not a named volume
+var/ollama_data/ # If Ollama models are stored here and not a named volume
+
+# Celery beat schedule
+celerybeat-schedule.*
+
+# Docker
+docker-compose.override.yml
+
+# Misc
+*.bak
+*.tmp
+
+# If .env in root is the actual environment file, it should be ignored.
+# The bootstrap script copies config/secrets.env to .env.
+# If you intend to commit a template .env file, name it .env.template or .env.example
+# and add .env to this .gitignore.
+# For this project, .env is created and should be ignored.
+.env

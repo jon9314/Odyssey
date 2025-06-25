@@ -1,0 +1,175 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: odyssey_backend
+    restart: unless-stopped # Good for development, consider 'always' or specific policies for prod
+    ports:
+      - "8000:8000" # Map host port 8000 to container port 8000 (where Uvicorn runs)
+    volumes:
+      - .:/app # Mount current directory to /app in container for live code updates
+    env_file:
+      - .env # Load environment variables from .env file (create this file from config/secrets.env)
+    environment:
+      PYTHONUNBUFFERED: 1 # Ensures Python output is sent straight to Docker logs
+      # Add any other backend-specific environment variables here if not in .env
+      # These URLs are crucial for Celery integration within Docker.
+      CELERY_BROKER_URL: "redis://valkey:6379/0"
+      CELERY_RESULT_BACKEND_URL: "redis://valkey:6379/0"
+    depends_on:
+      - valkey # Backend now depends on Valkey for Celery
+    networks:
+      - odyssey_network
+    # The command (Uvicorn) is specified in the Dockerfile's CMD directive
+    # command: uvicorn odyssey.agent.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # --- Other services to be implemented later ---
+  # Ensure to define them here when ready.
+
+  frontend:
+    build:
+      context: ./frontend # Path to the frontend directory
+      dockerfile: Dockerfile # Uses frontend/Dockerfile
+    container_name: odyssey_frontend
+    ports:
+      # Vite's default port is 5173. If your React app (e.g., from CRA) uses 3000, adjust container port.
+      - "5173:5173" # Map host port 5173 to container port 5173
+      # - "3000:3000" # Alternative if using port 3000 in container
+    volumes:
+      # Mount the frontend source code for live reloading during development
+      - ./frontend:/app/frontend
+      # Anonymous volume for node_modules to prevent host's node_modules from overwriting
+      # the container's node_modules, which can cause issues if OS differs.
+      - /app/frontend/node_modules
+    depends_on:
+      - backend # Frontend typically needs the backend API to be available
+    networks:
+      - odyssey_network
+    environment:
+      # Ensures hot module reloading works correctly with Vite in some Docker setups
+      CHOKIDAR_USEPOLLING: "true"
+      # Pass the backend API URL to the frontend.
+      # The frontend (api.js) should be configured to use this.
+      # VITE_API_BASE_URL is a common convention for Vite projects.
+      VITE_API_BASE_URL: "http://localhost:8000/api/v1" # For access from host browser
+      # If frontend makes server-side calls or calls from within Docker network to backend:
+      # VITE_INTERNAL_API_BASE_URL: "http://backend:8000/api/v1"
+    # env_file: # .env at project root is usually for backend. Frontend might have its own .env in frontend/
+    #   - ./frontend/.env # If you have a specific .env for frontend build/runtime config
+
+  valkey: # Redis-compatible message broker for Celery
+    image: valkey/valkey:latest
+    container_name: odyssey_valkey
+    restart: unless-stopped
+    ports:
+      - "6379:6379" # Expose Valkey to host (optional, for debugging or direct access)
+    volumes:
+      - valkey_data:/data # Persist Valkey data
+    networks:
+      - odyssey_network
+    # Add healthcheck if needed
+
+  # chroma: # Vector database for semantic memory
+  #   image: chromadb/chroma:latest
+  #   container_name: odyssey_chroma
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8001:8000" # Chroma's API runs on port 8000 in container, map to 8001 on host
+  #   volumes:
+  #     - chroma_data:/chroma/chroma # Persist Chroma data (verify path in Chroma docs)
+  #   networks:
+  #     - odyssey_network
+
+  # langfuse: # Observability platform
+  #   image: ghcr.io/langfuse/langfuse:latest
+  #   container_name: odyssey_langfuse
+  #   restart: unless-stopped
+  #   ports:
+  #     - "3001:3000" # Langfuse UI on port 3000 in container, map to 3001 on host
+  #   env_file: .env # For DATABASE_URL, NEXTAUTH_SECRET, etc.
+  #   depends_on:
+  #     - langfuse_db # Langfuse needs a database
+  #   networks:
+  #     - odyssey_network
+
+  # langfuse_db: # PostgreSQL database for Langfuse
+  #   image: postgres:15
+  #   container_name: odyssey_langfuse_db
+  #   restart: unless-stopped
+  #   # ports: # Not strictly necessary to expose to host if only Langfuse service accesses it
+  #   #   - "5433:5432"
+  #   volumes:
+  #     - langfuse_db_data:/var/lib/postgresql/data
+  #   environment:
+  #     POSTGRES_USER: ${LANGFUSE_DB_USER:-langfuse}
+  #     POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:-langfuse}
+  #     POSTGRES_DB: ${LANGFUSE_DB_NAME:-langfuse}
+  #   networks:
+  #     - odyssey_network
+
+  # ollama-local: # Local LLM serving
+  #   image: ollama/ollama:latest
+  #   container_name: odyssey_ollama_local
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama # Persist Ollama models
+  #   # GPU passthrough (example for NVIDIA)
+  #   # deploy:
+  #   #   resources:
+  #   #     reservations:
+  #   #       devices:
+  #   #         - driver: nvidia
+  #   #           count: 1
+  #   #           capabilities: [gpu]
+  #   networks:
+  #     - odyssey_network
+
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile # Uses the same Dockerfile as backend
+    container_name: odyssey_celery_worker
+    restart: unless-stopped
+    # Command to start the Celery worker.
+    # -A points to the Celery application instance.
+    # -l INFO sets the log level.
+    # -Q default specifies the queue to consume from (can be customized).
+    command: celery -A odyssey.agent.celery_app worker -l INFO -Q default
+    volumes:
+      - .:/app # Mount code for live updates, same as backend
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: 1
+      # These URLs are crucial for Celery integration within Docker.
+      CELERY_BROKER_URL: "redis://valkey:6379/0"
+      CELERY_RESULT_BACKEND_URL: "redis://valkey:6379/0"
+      # Add other env vars if worker needs them (e.g., OLLAMA URLs if tasks use LLM)
+    depends_on:
+      - valkey   # Worker must wait for the broker
+      - backend  # Worker might import code/models from the backend, or backend might create tasks on startup
+                 # If backend doesn't need to be up for worker to start, this can be removed.
+                 # For shared code, Docker image build handles it. If worker calls API of backend, then yes.
+    networks:
+      - odyssey_network
+
+# Volumes for persistent data (uncomment as services are added)
+volumes:
+  valkey_data: # Valkey data persistence
+    driver: local
+  # chroma_data:
+  #   driver: local
+  # langfuse_db_data:
+  #   driver: local
+  # ollama_data:
+  #   driver: local
+
+# Docker Network for services to communicate
+networks:
+  odyssey_network:
+    driver: bridge

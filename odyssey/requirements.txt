@@ -1,0 +1,77 @@
+# Core Python libraries
+fastapi
+uvicorn[standard] # For serving the FastAPI app, [standard] includes websockets and more
+pydantic
+pydantic-settings # For loading settings from .env and YAML
+
+# LLM Interaction
+requests # For Ollama client, or other HTTP based LLM APIs
+# openai # If using OpenAI's API directly
+
+# Task Queue
+celery[redis] # Includes redis dependency for broker/backend with Valkey (Redis compatible)
+# flower # Optional: for monitoring Celery tasks via a web UI. Add if desired.
+
+# Database & Memory
+# sqlalchemy # If using a relational DB like PostgreSQL/MySQL with an ORM
+# alembic # For SQLAlchemy database migrations
+# psycopg2-binary # For PostgreSQL
+# mysqlclient # For MySQL
+# For vector memory (examples, choose one or more as needed):
+# faiss-cpu # or faiss-gpu for vector similarity search
+chromadb # As per docker-compose.yml and MemoryManager intent
+# qdrant-client
+sentence-transformers # For generating embeddings for vector stores (needed by MemoryManager)
+
+# Observability
+langfuse # As per docker-compose.yml and MemoryManager intent
+psycopg2-binary # Required by Langfuse if using PostgreSQL backend (as per docker-compose)
+
+
+# Plugins & Tools (dependencies for example plugins)
+# --- Calendar Plugin (Google Calendar API) ---
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+# python-dateutil # Often useful for parsing dates with Google API, though datetime may suffice
+
+# caldav # For CalDAV based calendars (alternative, not used if Google API is primary)
+# ics # For .ics file parsing
+
+# --- OCR Plugin ---
+# pytesseract
+# Pillow # For image manipulation with Pytesseract
+# opencv-python-headless # For image preprocessing if needed by OCR
+
+# --- File Ops Plugin ---
+# No specific external dependencies for the basic example, uses `os` and `shutil`.
+
+# Development & Testing
+pytest
+pytest-cov # For test coverage
+# flake8 # For linting
+# black # For code formatting
+# mypy # For static type checking
+python-dotenv # For loading .env files (though pydantic-settings can also do this)
+
+# Other useful libraries
+# httpx # Modern async HTTP client, can replace 'requests' if fully async
+# PyYAML # For parsing YAML configuration files (pydantic-settings might handle this)
+# watchdog # For observing file system events (e.g., for hot reloading code)
+
+# Add your project's specific dependencies here.
+# Example:
+# numpy
+# pandas
+
+# For GPU support with certain libraries (e.g., PyTorch, TensorFlow, FAISS-GPU)
+# you might need to install versions compatible with your CUDA toolkit.
+# These are often installed separately or with specific pip commands.
+# e.g. torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# It's good practice to pin versions for reproducible builds:
+# fastapi==0.100.0
+# pydantic==2.0.0
+# etc.
+# You can generate a pinned list from your active virtual environment:
+# pip freeze > requirements.txt

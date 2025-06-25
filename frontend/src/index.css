@@ -1,0 +1,36 @@
+/* Global styles - can be minimal if App.css handles most things */
+/* Example: Reset some browser defaults or set a global font */
+
+body {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: light dark; /* Example for basic dark mode support if desired */
+  color: rgba(255, 255, 255, 0.87); /* Default dark mode text */
+  background-color: #242424; /* Default dark mode background */
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Light mode override if needed, or handle via CSS variables in App.css */
+@media (prefers-color-scheme: light) {
+  body {
+    color: #213547;
+    background-color: #ffffff;
+  }
+}
+
+#root {
+  width: 100%;
+  /* max-width: 1280px; */ /* Let App.jsx handle max-width for content area */
+  margin: 0 auto;
+  /* padding: 2rem; */ /* Let App.jsx handle padding */
+  text-align: center; /* Initial Vite default, can be overridden */
+}
+
+/* More specific global styles can go into App.css or imported stylesheets */
+```

@@ -1,0 +1,89 @@
+# Application settings
+# Example structure - adjust to your needs
+
+# Agent Configuration
+agent:
+  name: "Odyssey Agent"
+  default_model: "ollama_model_name_here" # e.g., llama3
+  max_iterations: 25
+  # Add other agent-specific settings
+
+# LLM Provider (Ollama example)
+llm:
+  ollama: # Settings for the OllamaClient
+    local_url: "${OLLAMA_LOCAL_URL:http://localhost:11434}" # Default to localhost if env var not set
+    remote_url: "${OLLAMA_REMOTE_URL:}" # Default to empty if env var not set (OllamaClient handles None)
+    default_model: "${OLLAMA_DEFAULT_MODEL:phi3}" # Default model for 'auto' mode in OllamaClient
+    request_timeout: 120 # seconds for API requests to Ollama
+
+# API Server
+api:
+  host: "0.0.0.0"
+  port: 8000
+  # Add API related settings
+
+# Celery Task Queue
+celery:
+  broker_url: "${CELERY_BROKER_URL:redis://localhost:6379/0}" # Default for local dev if not in Docker
+  result_backend: "${CELERY_RESULT_BACKEND_URL:redis://localhost:6379/0}" # Default for local dev
+  # Example for Docker Compose context (usually set directly in docker-compose.yml env for services):
+  # broker_url: "redis://valkey:6379/0"
+  # result_backend: "redis://valkey:6379/0"
+  task_serializer: "json"
+  result_serializer: "json"
+  accept_content: ["json"]
+  timezone: "UTC"
+  enable_utc: True
+  # Add other Celery settings like task_routes if needed
+
+# Memory Configuration
+memory:
+  type: "hybrid" # e.g., sqlite, vector, hybrid
+  sqlite_db_path: "var/memory.db"
+  vector_store_path: "var/vector_store"
+  backup_path: "var/memory_backup"
+  # Add other memory settings
+
+# Logging
+logging:
+  level: "INFO" # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  file: "logs/odyssey_agent.log"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Add other configuration sections as needed (e.g., plugins, database, etc.)
+# Example:
+# database:
+#   type: "postgresql"
+#   host: "localhost"
+#   port: 5432
+#   user: "odyssey_user"
+#   db_name: "odyssey_db"
+
+# plugins:
+#   calendar:
+#     api_key_env_var: "GOOGLE_CALENDAR_API_KEY" # Name of env var in secrets.env
+#   ocr:
+#     tesseract_path: "/usr/bin/tesseract" # Example setting
+#     default_language: "eng"
+
+# Plugin Specific Settings
+# These can be structured under a general 'plugins' key or per-plugin.
+# The AppSettings class in main.py will load these if they match environment variable names
+# or if this YAML is parsed into a Pydantic model that includes them.
+# For now, AppSettings directly defines these, so this YAML section is more for documentation
+# or if a more complex config loading (YAML -> Pydantic) is used.
+plugins_config:
+  calendar_tool:
+    google_application_credentials: "${GOOGLE_APPLICATION_CREDENTIALS:}" # Path to service account JSON, empty if not set
+    default_calendar_id: "${DEFAULT_CALENDAR_ID:primary}"
+  email_tool: # Settings for SendEmailTool
+    smtp_host: "${SMTP_HOST:}" # e.g., "smtp.gmail.com"
+    smtp_port: "${SMTP_PORT:587}" # Common ports: 587 (TLS), 465 (SSL), 25 (unencrypted - not recommended)
+    smtp_user: "${SMTP_USER:}"
+    smtp_password: "${SMTP_PASSWORD:}"
+    smtp_use_tls: "${SMTP_USE_TLS:true}"
+    smtp_sender_email: "${SMTP_SENDER_EMAIL:}"
+  notification_tool: # Settings for NotifyTool (Ntfy example)
+    ntfy_server_url: "${NTFY_SERVER_URL:https://ntfy.sh}" # Default public ntfy.sh server
+    ntfy_topic: "${NTFY_TOPIC:}" # User must define their topic in .env
+    # webhook_url: "${NOTIFICATION_WEBHOOK_URL:}" # Example for a generic webhook
