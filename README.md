@@ -372,6 +372,69 @@ While the sandbox is primarily invoked by the automated Celery pipeline, a devel
     ```
 This script would allow a developer to run the `run_validation_in_docker` method directly on a specified local path, helping to debug the sandbox logic or test a `Dockerfile` and test setup for a proposal.
 
+## Best Practices, Troubleshooting, and Production Considerations
+
+This section provides guidance on best practices, troubleshooting common issues, and considerations for running Odyssey's memory and observability systems effectively, especially in production-like environments.
+
+### I. Data Security and PII (Personally Identifiable Information)
+
+*   **Semantic Memory Content:**
+    *   **Be Mindful of Ingested Data:** The semantic memory (vector store) will store and index the text you provide to it via `MemoryManager.add_semantic_memory_event()`. If this source text contains PII or sensitive information, that information will reside in your vector database.
+    *   **Recommendation:** Implement data sanitization or anonymization in your data ingestion pipelines *before* feeding text into Odyssey's semantic memory if PII should not be stored or indexed.
+*   **Logging (Python & Langfuse):**
+    *   **Python Logs:** Odyssey's Python logs aim to use snippets for potentially long or sensitive free-text fields at the `INFO` level (e.g., task descriptions, semantic text snippets). However, `DEBUG` level logs can be very verbose and may include full outputs from sandboxed processes or Docker commands.
+        *   **Recommendation:** Avoid running with `DEBUG` level logging in production unless actively troubleshooting a specific issue. Ensure debug logs, if generated, are stored securely and have appropriate retention policies.
+    *   **Langfuse Traces:**
+        *   LLM prompts and responses are sent to Langfuse, as this is crucial for observability and debugging LLM interactions. If these prompts/responses contain PII, that data will be in your Langfuse instance.
+        *   For other operations (memory events, proposal steps), Odyssey generally logs snippets of free-text data and structured metadata. However, entire metadata dictionaries associated with semantic entries or filters used in queries are logged.
+        *   **Recommendation:** Be aware of what data is being processed by Odyssey. If PII is involved, understand that it will be part of Langfuse traces. Consider Langfuse's data handling and security features if you are using Langfuse Cloud, or your own security measures if self-hosting Langfuse. For highly sensitive PII, advanced redaction techniques prior to LLM interaction or Langfuse logging might be necessary (this is currently outside Odyssey's built-in capabilities but could be a custom extension).
+*   **Configuration Secrets:**
+    *   Ensure API keys (like `LANGFUSE_SECRET_KEY`, `OLLAMA_API_KEY` if used, etc.) and other secrets are managed securely, preferably through environment variables or a secrets management system, and *never* hardcoded into the codebase or version control. The `.env` file method is suitable for local development but requires careful handling for production.
+
+### II. Langfuse Observability
+
+*   **Setup & Configuration:**
+    *   Ensure `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_HOST` environment variables are correctly set for the Odyssey backend and Celery workers.
+    *   The default `LANGFUSE_HOST` is `http://localhost:3000`, suitable for the provided `docker-compose.yml` setup. For Langfuse Cloud, use `https://cloud.langfuse.com`.
+*   **Troubleshooting Connection Issues:**
+    *   **Check Keys/Host:** Double-check that your public key, secret key, and host URL are accurate.
+    *   **Network Accessibility:** If self-hosting Langfuse, ensure the Langfuse server is reachable from where the Odyssey backend and Celery workers are running (e.g., correct Docker networking, firewall rules).
+    *   **Odyssey Logs:** Check Odyssey's startup logs. The `LangfuseClientWrapper` will log whether it initialized successfully or why it failed (e.g., "Langfuse not configured" or specific connection errors).
+    *   **Langfuse Server Logs:** If self-hosting, check the logs of your Langfuse Docker container for any errors.
+*   **Understanding Traces in Langfuse UI:**
+    *   **LLM Calls:** Traces named like "OllamaClient.ask.StandaloneTrace" or "OllamaClient.generate_embeddings.StandaloneTrace" (or with custom names if provided by the caller) capture individual LLM interactions. Inside these, you'll find a "generation" step with prompt, completion, model, tokens, latency, etc.
+    *   **Memory Events:** Events from `MemoryManager` (e.g., "memory_add_task", "memory_semantic_search") are typically logged as distinct events within new traces by default. Metadata will include IDs, snippets of input, and summaries of output.
+    *   **Proposal Lifecycle:** Look for "memory_log_proposal_step" events to track the progress of self-modification proposals, identified by `proposal_id` in their metadata.
+    *   **Release Version:** Traces are associated with Odyssey's application version (if available), helping to correlate observations with specific code versions.
+*   **Managing Data Volume (Advanced):**
+    *   Odyssey currently traces most key LLM and memory operations. For very high-throughput systems, the volume of data sent to Langfuse might become a consideration.
+    *   Langfuse itself offers features like sampling or you might consider customizing `LangfuseClientWrapper` or its usage points to be more selective about what gets traced if this becomes a concern (e.g., only trace errors or a percentage of successful operations). This is an advanced topic not covered by default.
+
+### III. Vector Store (ChromaDB)
+
+*   **Persistence & Backup:**
+    *   ChromaDB is configured to persist data to disk by default (path configured by `VECTOR_STORE_PERSIST_PATH`, e.g., `var/memory/vector_store_chroma/`).
+    *   **Recommendation:** Regularly back up this persistence directory as part of your overall data backup strategy.
+*   **Monitoring:**
+    *   **Disk Space:** Monitor the disk space used by the ChromaDB `persist_directory`, as it will grow with the number of semantic entries.
+    *   **System Resources:** Embedding generation (done by Sentence Transformers models) can be CPU-intensive. Querying can also consume CPU and memory. Monitor system resources on the machine running Odyssey, especially if you have a very large vector store or high query/ingestion rates.
+*   **Performance Considerations:**
+    *   **Embedding Model:** The default `all-MiniLM-L6-v2` is a good balance of quality and performance. Larger models may provide better semantic understanding but will be slower and require more resources for embedding generation.
+    *   **Dataset Size:** Query latency can increase with the number of items in the collection.
+    *   **Metadata Filters:** Complex `where` clauses in ChromaDB queries can impact performance.
+    *   **Hardware:** For large-scale deployments, consider the CPU and RAM available to Odyssey.
+*   **Troubleshooting:**
+    *   **Initialization Errors:** Check Odyssey's startup logs. `MemoryManager` will log errors if `ChromaVectorStore` fails to initialize (e.g., issues with the persist directory permissions, problems loading the embedding model).
+    *   **"ChromaDB library not found" / "SentenceTransformers library not found":** Ensure `chromadb` and `sentence-transformers` are correctly installed in your Python environment (see `odyssey/requirements.txt`).
+    *   **Data Corruption (Rare):** If you suspect data corruption in ChromaDB, the primary recovery method is to restore from a backup of the `persist_directory`. You might also try stopping Odyssey, deleting the persist directory (if you have backups or can re-index), and restarting to let ChromaDB create a fresh database.
+
+### IV. General Production Readiness
+
+*   **Configuration Management:** Use environment variables for all sensitive configurations (API keys, secrets) and external service URLs. Do not commit secrets to version control.
+*   **Dependency Updates:** Regularly update Python dependencies (including `langfuse`, `chromadb`, `fastapi`, `celery`, etc.) to benefit from security patches and bug fixes.
+*   **API Security:** Secure your Odyssey API endpoints appropriately (e.g., authentication, authorization, rate limiting) if exposing them beyond a trusted local environment.
+*   **Resource Allocation:** Ensure sufficient CPU, memory, and disk resources for all components of Odyssey (FastAPI backend, Celery workers, Ollama, Langfuse, vector database).
+
 ## Semantic Memory (Vector Store)
 
 Beyond its structured SQLite memory, Odyssey incorporates a semantic memory system powered by a vector store. This allows the agent to store textual information (like events, logs, observations, or document chunks) and retrieve it based on semantic similarity rather than exact keyword matches.

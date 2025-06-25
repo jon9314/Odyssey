@@ -137,7 +137,8 @@ class MemoryManager:
                     (description, 'pending', timestamp)
                 )
                 task_id = cursor.lastrowid
-                logger.info(f"Task added with ID: {task_id}, Description: '{description}'")
+                desc_snippet = description[:100] + "..." if len(description) > 100 else description
+                logger.info(f"Task added with ID: {task_id}, Description snippet: '{desc_snippet}'")
                 self.log_to_langfuse({
                     "event_type": "memory_add_task", # More specific event name
                     "task_id": task_id,
