@@ -72,12 +72,13 @@ class AppSettings(BaseSettings):
 
     # SelfModifier settings
     repo_path: str = "." # Default to current directory, can be overridden by env
+    SELF_MOD_APPROVAL_MODE: str = "manual" # Options: 'manual' (default), 'auto'
 
     # For .env file loading by Pydantic-Settings
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
-        extra = "ignore"
+        extra = "ignore" # Allow other env variables not defined in settings
 
 
 # Application state to hold initialized components

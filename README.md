@@ -189,3 +189,33 @@ Replace `YOUR_PROPOSAL_ID` with an actual ID obtained from the propose step.
     ```bash
     curl -X POST http://localhost:8000/api/v1/self-modify/proposals/YOUR_PROPOSAL_ID/reject | jq
     ```
+
+### Approval Mode
+
+Odyssey supports two approval modes for self-modification proposals, configurable via the `SELF_MOD_APPROVAL_MODE` setting (in your `.env` file or environment variables):
+
+*   **`manual`** (Default and Recommended):
+    *   After a proposal's changes have been successfully validated in the sandbox (status: `validation_passed`), it requires explicit approval via the `POST /api/v1/self-modify/proposals/{proposal_id}/approve` API endpoint before it can be merged.
+    *   This is the safest mode, ensuring a human or a trusted external system reviews validated changes.
+
+*   **`auto`**:
+    *   If a proposal successfully passes the sandbox validation (status: `validation_passed`), the system will automatically:
+        1.  Mark the proposal as "auto_approved" (with `approved_by: system_auto_approval`).
+        2.  Immediately trigger the `merge_approved_proposal_task` to merge the changes into the main development branch.
+        3.  Update the status to "merge_pending".
+    *   No manual API call to the `/approve` endpoint is needed in this mode.
+
+**Configuration:**
+
+To enable auto-approval, set the environment variable:
+```ini
+SELF_MOD_APPROVAL_MODE=auto
+```
+Or, if using a primary YAML configuration that `pydantic-settings` reads before environment variables, you could define it there:
+```yaml
+# In config/settings.yaml (example)
+SELF_MOD_APPROVAL_MODE: auto
+```
+However, environment variables typically take precedence with `pydantic-settings`.
+
+⚠️ **Warning:** The `auto` approval mode is potentially risky as it allows the agent to merge code into its main branch without direct human intervention after validation. While the validation step aims to ensure code quality and safety, it might not catch all issues. **Use `auto` mode with extreme caution, preferably only in isolated test environments or when the validation pipeline is exceptionally robust and trusted.**

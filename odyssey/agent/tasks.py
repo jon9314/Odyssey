@@ -297,9 +297,50 @@ def run_sandbox_validation_task(self, proposal_id: str, branch_name: str) -> Dic
         # 5. Update MemoryManager
         memory.log_proposal_step(
             proposal_id=proposal_id, branch_name=branch_name, status=validation_status,
-            commit_message=original_commit_message, validation_output=validation_output
+            commit_message=original_commit_message, validation_output=validation_output_log # Use the full log
         )
-        return {"proposal_id": proposal_id, "status": validation_status, "output": validation_output}
+
+        # Step 6: Check approval mode and conditionally trigger merge if validation passed
+        if validation_status == "validation_passed":
+            logger.info(f"{log_prefix} Validation passed. Checking approval mode: {settings.SELF_MOD_APPROVAL_MODE}")
+            if settings.SELF_MOD_APPROVAL_MODE.lower() == "auto":
+                logger.info(f"{log_prefix} Auto-approval mode enabled. Proceeding with auto-approval and triggering merge.")
+
+                auto_approved_by = "system_auto_approval"
+                # Log "auto_approved" status
+                memory.log_proposal_step(
+                    proposal_id=proposal_id, branch_name=branch_name, status="auto_approved",
+                    commit_message=original_commit_message, approved_by=auto_approved_by,
+                    validation_output=validation_output_log
+                )
+                logger.info(f"{log_prefix} Proposal status updated to 'auto_approved'.")
+
+                # Trigger merge task
+                try:
+                    from odyssey.agent.tasks import merge_approved_proposal_task # Ensure it's imported if not at top
+                    merge_task_result = merge_approved_proposal_task.delay(proposal_id=proposal_id)
+                    logger.info(f"{log_prefix} Merge task ({merge_task_result.id}) triggered for auto-approved proposal {proposal_id}.")
+
+                    # Log "merge_pending" status
+                    memory.log_proposal_step(
+                        proposal_id=proposal_id, branch_name=branch_name, status="merge_pending",
+                        commit_message=original_commit_message, approved_by=auto_approved_by,
+                        validation_output=validation_output_log
+                    )
+                    logger.info(f"{log_prefix} Proposal status updated to 'merge_pending'.")
+
+                except Exception as e_merge_trigger:
+                    logger.error(f"{log_prefix} Failed to trigger merge task for auto-approved proposal: {e_merge_trigger}", exc_info=True)
+                    # Log this failure back to the proposal
+                    memory.log_proposal_step(
+                        proposal_id=proposal_id, branch_name=branch_name, status="merge_trigger_failed", # New status
+                        commit_message=original_commit_message, approved_by=auto_approved_by,
+                        validation_output=validation_output_log + f"\nERROR: Auto-merge trigger failed: {str(e_merge_trigger)}"
+                    )
+            else: # Manual mode
+                logger.info(f"{log_prefix} Manual approval mode. Proposal '{proposal_id}' awaiting manual approval via API.")
+
+        return {"proposal_id": proposal_id, "status": validation_status, "output": validation_output_log}
 
     except Exception as e:
         logger.error(f"{log_prefix} Task critically failed. Error: {e}", exc_info=True)
