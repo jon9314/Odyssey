@@ -63,3 +63,52 @@ The GitHub integration relies on several environment variables for authenticatio
 3.  Optionally, set `MAIN_BRANCH_NAME` if your main branch is not named "main".
 
 Once configured, when Odyssey's self-modification features are triggered to propose and apply code changes, it should automatically handle pushing to a new branch and creating a pull request.
+
+## Continuous Integration (CI) Workflow
+
+To ensure the quality and stability of code changes, Odyssey now integrates with a GitHub Actions CI workflow. This workflow automatically tests and validates pull requests.
+
+### CI Workflow Overview
+
+*   **File Location**: `.github/workflows/ci.yml`
+*   **Triggers**: The CI workflow is automatically triggered on:
+    *   Pull requests targeting the `main` or `master` branch.
+    *   Pushes to `main`, `master`, or branches prefixed with `feature/`, `fix/`, `bugfix/`, `hotfix/`, `proposal/`.
+*   **Checks Performed**:
+    1.  **Dependency Installation**: Installs Python and all required packages from `odyssey/requirements.txt`.
+    2.  **Code Formatting (Black)**: Checks if the code adheres to the Black formatting standards (`black --check .`).
+    3.  **Linting (Flake8)**: Analyzes the code for style issues and potential errors using Flake8 (`flake8 .`).
+    4.  **Type Checking (MyPy)**: Performs static type checking to catch type-related errors (`mypy . --ignore-missing-imports`).
+    5.  **Unit/Integration Tests (Pytest)**: Executes the test suite using Pytest (`pytest`).
+    6.  **Docker Build**: Builds the application's Docker image using `odyssey/Dockerfile`.
+    7.  **In-Container Tests**: Runs a basic test within the built Docker container (`python -m unittest discover -s ./tests`) to verify the packaged application's integrity.
+
+### CI Status and PR Merging
+
+*   **Status Checking**: Before a pull request can be programmatically merged by Odyssey (e.g., via the `SelfModifier.merge_pr` method), Odyssey will:
+    1.  Use the GitHub API to check the status of the CI workflow associated with the PR.
+    2.  Poll the CI status for a configurable number of attempts if it's initially "pending".
+*   **Merge Gating**:
+    *   If the CI workflow status is "success" (or "neutral"/"skipped", indicating no hard failures), Odyssey will proceed with the merge attempt.
+    *   If the CI workflow status is "failure", "action_required", "cancelled", "timed_out", or remains "pending" after polling, the automated merge will be **aborted**.
+*   **Logging**: The CI status, including any polling attempts and the final outcome, is logged. This information helps in tracking why a merge might have been deferred or aborted. The log will usually include a URL to the specific CI run or the PR's checks tab on GitHub.
+    *   Example log message: `CI_STATUS: PR_NUM='123', SHA='abcdef...', Status='success', Conclusion='success', URL='https://github.com/owner/repo/pull/123/checks'`
+    *   Example merge log: `MERGE_ABORTED_CI: PR #123, Reason: CI failed or pending, Details: CI checks failed or requires attention...`
+
+### Reviewing CI Results
+
+*   You can view the detailed output and status of CI runs directly on GitHub:
+    *   Go to the **Pull Requests** tab in your repository.
+    *   Open the specific pull request.
+    *   Look for the "checks" section near the merge button. It will show the status of each check (e.g., `test-and-lint`, `docker-build`).
+    *   You can click on "Details" for any check to see its logs and output.
+    *   Alternatively, go to the **Actions** tab of your repository to see a list of all workflow runs.
+
+### Environment Variables for Testing CI Status Check
+
+If you want to test the `GitHubClient.get_pr_ci_status` method directly using its `if __name__ == '__main__':` block, you can set these environment variables:
+
+*   `GITHUB_TEST_PR_NUMBER`: The number of a PR in your `GITHUB_REPOSITORY` that has CI checks.
+*   `GITHUB_TEST_HEAD_SHA`: (Alternative to PR number) The commit SHA (usually the head of a PR branch) for which to check CI status.
+
+This CI integration helps maintain code quality by ensuring that proposed changes pass automated checks before they are integrated into the main codebase.

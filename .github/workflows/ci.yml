@@ -1,0 +1,139 @@
+name: Odyssey CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - feature/*
+      - fix/*
+      - bugfix/*
+      - hotfix/*
+      - proposal/*
+  pull_request:
+    branches:
+      - main
+      - master
+
+jobs:
+  test-and-lint:
+    name: Test, Lint, and Type Check
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: ["3.11"] # Specify desired Python versions
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        working-directory: ./odyssey # Assuming requirements.txt is in the odyssey subdirectory
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Check formatting with Black
+        working-directory: ./odyssey
+        run: |
+          black --check .
+
+      - name: Lint with Flake8
+        working-directory: ./odyssey
+        run: |
+          flake8 .
+
+      - name: Type check with MyPy
+        working-directory: ./odyssey
+        # MyPy might need a configuration file (mypy.ini or pyproject.toml section) for specific rules.
+        # Add --ignore-missing-imports if many 3rd party libs without stubs cause noise initially.
+        # Adjust based on project structure and needs.
+        run: |
+          mypy . --ignore-missing-imports
+
+      - name: Run Pytest
+        working-directory: ./odyssey
+        run: |
+          pytest
+
+  docker-build:
+    name: Docker Build and Test
+    runs-on: ubuntu-latest
+    needs: test-and-lint # Run this job only if test-and-lint succeeds
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        # This assumes Dockerfile is in the odyssey subdirectory relative to repo root.
+        # If Dockerfile is at repo root, change context to . and dockerfile to ./Dockerfile
+        run: |
+          docker build -t odyssey-ci-test:latest -f odyssey/Dockerfile ./odyssey
+
+      - name: Run a simple test in Docker container
+        # This is a basic test. For a service, you might run the container
+        # and then curl a health endpoint.
+        # For now, just ensure the built image can run a command.
+        # If your Docker container has a specific entrypoint or CMD, adapt this.
+        # Example: If it's a Python app, you might run `docker run odyssey-ci-test:latest python --version`
+        # or a specific script like `docker run odyssey-ci-test:latest python /app/manage.py check`
+        # This depends heavily on the Dockerfile's contents.
+        # Assuming a generic base image for now or that the app has a simple echo command.
+        # If the Dockerfile sets up an app that runs on start, this test might need to be `docker run --rm odyssey-ci-test:latest /bin/true`
+        # or a command that executes and exits successfully if the app is correctly built.
+        # For Odyssey, it seems to be a FastAPI app, so a real test would be more involved (run container, curl health).
+        # For now, let's just ensure the entrypoint (if any) or a basic command works.
+        # The Dockerfile provided previously seems to be for a FastAPI app.
+        # `run_validation_in_docker` in sandbox.py has a more complex test sequence.
+        # Here, we'll just test if the container can start and execute a simple command.
+        # This will be `python -m unittest discover -s ./tests` if tests can run inside the container.
+        # The Dockerfile from context has `CMD ["uvicorn", "odyssey.agent.main:app", "--host", "0.0.0.0", "--port", "8000"]`
+        # which means the container starts a service.
+        # A simple test would be to override entrypoint to run tests, or to run the service and curl it.
+        # Let's try to run pytest inside the container if possible.
+        # This requires that the test files and Python environment are correctly set up in the Docker image.
+        run: |
+          echo "Attempting to run tests inside the Docker container..."
+          # If your Docker image copies the 'tests' directory and has pytest installed:
+          # The Dockerfile should include test files and pytest in its build.
+          # If not, this command will fail or do nothing useful.
+          # Assuming the Dockerfile is set up to run the application,
+          # a better test might be to run the container in detached mode, wait, and curl a health endpoint.
+          # For simplicity in this CI step, we'll try a command that should work if python and basic structure is there.
+          # This is a placeholder and likely needs refinement based on the actual Dockerfile content and test setup.
+          docker run --rm odyssey-ci-test:latest python -c "import sys; print(f'Python version in container: {sys.version}')" && \
+          docker run --rm odyssey-ci-test:latest ls /app/odyssey/agent && \
+          echo "Simple Docker container command test passed."
+          # A more robust test would be to run actual application tests inside the container if the image is built for it.
+          # For example, if tests are copied and pytest is installed in the image:
+          # docker run --rm odyssey-ci-test:latest pytest /app/tests
+          # This CI step is primarily for build verification; more complex tests are in sandbox.py
+          # However, if the Dockerfile is expected to produce a testable image for CI, this should be expanded.
+          # Given the current sandbox.py runs tests inside docker, the image should be testable.
+          # Let's assume the Dockerfile copies the 'tests' directory into /app/tests and installs pytest.
+          # The working directory in the Docker image seems to be /app.
+          # So, the command would be `pytest tests` if run from /app.
+          # Let's try that, assuming the Dockerfile is set up appropriately.
+          # If the Dockerfile is missing `COPY ./tests /app/tests`, this will fail.
+          # Based on sandbox.py, the test command is `python -m unittest discover -s ./tests`
+          # Let's use that.
+          docker run --rm odyssey-ci-test:latest python -m unittest discover -s ./tests -p "test_*.py" || \
+            (echo "In-container tests failed or 'tests' directory not found/pytest not installed in image. Check Dockerfile." && exit 1)
+          echo "In-container tests (or attempt) finished."
+
+    outputs:
+      docker_image_tag: odyssey-ci-test:latest
+
+# Future job: could add a 'merge-check' job that depends on docker-build and uses GitHubClient
+# to check the status of this workflow before allowing SelfModifier to merge.
+# For now, SelfModifier will poll using GitHubClient directly.

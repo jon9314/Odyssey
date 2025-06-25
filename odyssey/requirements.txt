@@ -49,9 +49,9 @@ google-auth-oauthlib
 # Development & Testing
 pytest
 pytest-cov # For test coverage
-# flake8 # For linting
-# black # For code formatting
-# mypy # For static type checking
+flake8 # For linting
+black # For code formatting
+mypy # For static type checking
 python-dotenv # For loading .env files (though pydantic-settings can also do this)
 
 # Other useful libraries

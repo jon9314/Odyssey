@@ -425,41 +425,130 @@ class SelfModifier:
         # This requires GitHub API interaction.
         logger.info(f"Attempting to merge PR '{pr_id}' using method '{merge_method}'.")
 
+        # Step 1: Check CI Status before attempting merge
+        pr_number_to_check = None
+        if isinstance(pr_id, str) and pr_id.startswith("http"):
+            try:
+                pr_number_to_check = int(pr_id.split('/')[-1])
+            except ValueError:
+                logger.error(f"Could not parse PR number from URL: {pr_id}")
+                return False # Cannot check CI status
+        elif isinstance(pr_id, int):
+            pr_number_to_check = pr_id
+        elif isinstance(pr_id, str) and pr_id.isdigit():
+            pr_number_to_check = int(pr_id)
+
+        if not pr_number_to_check:
+            logger.error(f"Invalid pr_id format '{pr_id}' for checking CI status. Expected PR number or full URL.")
+            return False
+
+        logger.info(f"Checking CI status for PR #{pr_number_to_check} before attempting merge.")
+        ci_passed, ci_status_message = self.check_pr_ci_status(pr_number=pr_number_to_check, poll_retries=5, poll_interval=15)
+
+        if not ci_passed:
+            logger.error(f"CI checks for PR #{pr_number_to_check} did not pass or are not complete. Status: {ci_status_message}. Merge aborted.")
+            # Log this to proposal log
+            logger.info(f"MERGE_ABORTED_CI: PR #{pr_number_to_check}, Reason: CI failed or pending, Details: {ci_status_message}")
+            return False
+
+        logger.info(f"CI checks for PR #{pr_number_to_check} passed. Proceeding with merge attempt.")
+        logger.info(f"MERGE_ATTEMPT_CI_PASSED: PR #{pr_number_to_check}, Details: {ci_status_message}")
+
+
+        # Step 2: Attempt Merge (CLI or API)
         if not self._gh_client:
             logger.warning("GitHubClient not initialized. Cannot merge PR via API. Falling back to CLI if available.")
             # Fallback to CLI
             try:
                 subprocess.run(["gh", "--version"], check=True, capture_output=True, text=True)
                 merge_flag = f"--{merge_method}"
-                # Ensure pr_id is just the number if it's a URL for gh cli
-                pr_identifier = pr_id.split('/')[-1] if pr_id.startswith("http") else pr_id
+                pr_identifier_cli = str(pr_number_to_check) # Use the validated PR number
 
-                pr_merge_command = ["gh", "pr", "merge", pr_identifier, merge_flag, "--delete-branch"]
+                pr_merge_command = ["gh", "pr", "merge", pr_identifier_cli, merge_flag, "--delete-branch"]
                 logger.info(f"Using 'gh' CLI to merge PR: {' '.join(pr_merge_command)}")
                 process = subprocess.run(pr_merge_command, cwd=self.repo_path, capture_output=True, text=True, check=False)
                 if process.returncode == 0:
-                    logger.info(f"PR '{pr_identifier}' merged successfully using 'gh' CLI.")
+                    logger.info(f"PR_MERGED_CLI: PR #{pr_identifier_cli} merged successfully using 'gh' CLI.")
                     return True
                 else:
-                    logger.error(f"'gh pr merge' failed for PR '{pr_identifier}': {process.stderr}")
+                    logger.error(f"MERGE_FAILED_CLI: 'gh pr merge' failed for PR #{pr_identifier_cli}: {process.stderr}")
                     return False
             except (FileNotFoundError, subprocess.CalledProcessError) as e:
-                logger.warning(f"'gh' CLI not found or failed during merge: {e}. Please merge PR manually.")
+                logger.warning(f"MERGE_FAILED_CLI_ERROR: 'gh' CLI not found or failed during merge: {e}. Please merge PR manually.")
                 return False
             except Exception as e:
-                logger.error(f"Unexpected error during 'gh pr merge': {e}", exc_info=True)
+                logger.error(f"MERGE_FAILED_CLI_UNEXPECTED_ERROR: Unexpected error during 'gh pr merge': {e}", exc_info=True)
                 return False
 
-        # If GitHubClient is available, use it (not yet implemented in GitHubClient)
-        # For now, this part remains conceptual for PyGithub based merge
-        logger.error("PR merging via PyGithub API not yet implemented in GitHubClient. Only CLI fallback is attempted.")
+        # If GitHubClient is available, use it (conceptually, as merge_pr isn't implemented in GitHubClient yet)
+        logger.error("PR merging via PyGithub API not yet implemented in GitHubClient. Only CLI fallback is currently functional if GitHubClient is None.")
         # Example of what it might look like if GitHubClient had merge_pr:
         # try:
-        #     return self._gh_client.merge_pr(pr_id, merge_method)
+        #     merge_success = self._gh_client.merge_pr_api(pr_number_to_check, merge_method) # Hypothetical method
+        #     if merge_success:
+        #         logger.info(f"PR_MERGED_API: PR #{pr_number_to_check} merged successfully via API.")
+        #         return True
+        #     else:
+        #         logger.error(f"MERGE_FAILED_API: PR #{pr_number_to_check} failed to merge via API.")
+        #         return False
         # except Exception as e:
-        #     logger.error(f"Error merging PR '{pr_id}' using API: {e}")
+        #     logger.error(f"MERGE_FAILED_API_ERROR: Error merging PR #{pr_number_to_check} using API: {e}")
         #     return False
-        return False # Default to false as API merge is not implemented
+        return False # Default to false as API merge is not implemented in GitHubClient
+
+    def check_pr_ci_status(self, pr_number: Optional[int] = None, head_sha: Optional[str] = None, poll_retries: int = 0, poll_interval: int = 30) -> tuple[bool, str]:
+        """
+        Checks the CI status of a pull request. Can optionally poll if status is pending.
+        :param pr_number: The number of the pull request.
+        :param head_sha: The SHA of the commit to check (if pr_number is not available).
+        :param poll_retries: Number of times to poll if the status is 'pending'. 0 means no polling.
+        :param poll_interval: Seconds to wait between polls.
+        :return: Tuple (ci_passed: bool, message: str including status, conclusion, and URL).
+        """
+        if not self._gh_client:
+            logger.warning("GitHubClient not initialized. Cannot check PR CI status via API.")
+            return False, "GitHubClient not available to check CI status."
+
+        if not pr_number and not head_sha:
+            msg = "Cannot check CI status: Either pr_number or head_sha must be provided."
+            logger.error(msg)
+            return False, msg
+
+        attempt = 0
+        while attempt <= poll_retries:
+            if attempt > 0:
+                logger.info(f"Polling PR CI status (attempt {attempt}/{poll_retries}), waiting {poll_interval}s...")
+                import time
+                time.sleep(poll_interval)
+
+            status, conclusion, html_url = self._gh_client.get_pr_ci_status(pr_number=pr_number, head_sha=head_sha)
+
+            # Proposal Log Update
+            log_message_ci_status = f"CI_STATUS: PR_NUM='{pr_number if pr_number else 'N/A'}', SHA='{head_sha if head_sha else 'N/A'}', Status='{status}', Conclusion='{conclusion}', URL='{html_url}'"
+            logger.info(log_message_ci_status)
+
+            if status == "success":
+                return True, f"CI checks passed. Status: {status}, Conclusion: {conclusion or 'N/A'}. Details: {html_url or 'N/A'}"
+            elif status == "pending":
+                if attempt < poll_retries:
+                    attempt += 1
+                    continue # Go to next poll attempt
+                else:
+                    return False, f"CI checks still pending after {poll_retries} retries. Status: {status}, Conclusion: {conclusion or 'N/A'}. Details: {html_url or 'N/A'}"
+            elif status in ["failure", "action_required", "cancelled", "timed_out"]:
+                return False, f"CI checks failed or requires attention. Status: {status}, Conclusion: {conclusion or 'N/A'}. Details: {html_url or 'N/A'}"
+            elif status == "neutral" or status == "skipped":
+                 # Depending on policy, neutral/skipped might be acceptable. For now, let's say it's not a hard pass for merge.
+                 # Or, treat neutral as pass if no failures.
+                 # Let's consider neutral/skipped as a pass IF no failures are present.
+                 # The current get_pr_ci_status logic already tries to find any failure.
+                 # If it returns neutral, it implies no hard failures were found.
+                 logger.info(f"CI status is '{status}'. Considering this as acceptable for merge if no explicit failures were reported.")
+                 return True, f"CI checks reported '{status}'. No explicit failures. Details: {html_url or 'N/A'}"
+            else: # unknown or other states
+                return False, f"CI status is unknown or in an unhandled state: {status}, Conclusion: {conclusion or 'N/A'}. Details: {html_url or 'N/A'}"
+
+        return False, "CI check polling finished without a definitive success." # Should be covered by else in loop
 
     def reload_code(self) -> None:
         """
@@ -619,22 +708,46 @@ if __name__ == '__main__':
         print("  (To run, SelfModifier's sandbox_test would need a proper clone path with the branch checked out)")
         test_passed = True # Assume pass for example flow
 
-        if test_passed:
-            if pr_url and "Error" not in pr_url and pr_url.startswith("http"):
-                print(f"\n--- Merging PR {pr_url} (Conceptual) ---")
-                # The merge_pr in SelfModifier currently only has CLI fallback and no API impl.
-                # merge_successful = modifier.merge_pr(pr_id=pr_url, merge_method="squash") # Example
-                # print(f"Merge PR result: {merge_successful}")
-                # if merge_successful:
-                #     print("PR merged successfully (conceptually).")
-                #     modifier.reload_code()
-                # else:
-                # print("PR merge failed or was skipped (conceptual).")
-                print(f"SKIPPING MERGE for PR {pr_url} in this example as API merge is not fully implemented in SelfModifier/GitHubClient.")
+        if test_passed: # Conceptual sandbox test from example
+            if pr_url and not isinstance(pr_url, str) or not pr_url.startswith("Error"): # Check if pr_url is a valid URL string
+                pr_number_for_ci_check = None
+                try:
+                    pr_number_for_ci_check = int(pr_url.split('/')[-1])
+                except (ValueError, AttributeError, IndexError):
+                    logger.warning(f"Could not parse PR number from PR URL '{pr_url}' for CI check. Skipping CI check and merge.")
+
+                if pr_number_for_ci_check:
+                    print(f"\n--- Checking CI Status for PR #{pr_number_for_ci_check} (URL: {pr_url}) ---")
+                    # Poll for CI status with retries
+                    # In a real scenario, polling might happen asynchronously or over a longer period.
+                    # For this example, using a few retries with a short interval.
+                    ci_passed, ci_message = modifier.check_pr_ci_status(pr_number=pr_number_for_ci_check, poll_retries=3, poll_interval=10) # Poll for ~30s
+                    print(f"CI Check Result for PR #{pr_number_for_ci_check}: {'PASSED' if ci_passed else 'FAILED/PENDING'}. Message: {ci_message}")
+
+                    if ci_passed:
+                        print(f"\n--- Attempting to Merge PR #{pr_number_for_ci_check} (Conceptual) ---")
+                        # The merge_pr in SelfModifier now includes CI check again, but check_pr_ci_status handles logging better for this example.
+                        # For this example, we'll call merge_pr directly, assuming the CI check inside it will also pass if we got here.
+                        # Or, we can rely on the check we just did.
+                        # Let's assume the earlier check_pr_ci_status is the gate.
+
+                        # merge_successful = modifier.merge_pr(pr_id=str(pr_number_for_ci_check), merge_method="squash")
+                        # print(f"Merge PR result: {merge_successful}")
+                        # if merge_successful:
+                        #     print(f"PR #{pr_number_for_ci_check} merged successfully (conceptually).")
+                        #     modifier.reload_code()
+                        # else:
+                        #     print(f"PR #{pr_number_for_ci_check} merge failed or was skipped (conceptually).")
+                        print(f"SKIPPING ACTUAL MERGE for PR #{pr_number_for_ci_check} in this example. merge_pr would be called here.")
+                        print("If merge_pr were called, it would re-check CI status as a safeguard.")
+                    else:
+                        print(f"Skipping merge for PR #{pr_number_for_ci_check} because CI checks did not pass or are still pending.")
+                else:
+                    print(f"Could not determine PR number from URL '{pr_url}'. Skipping CI check and merge.")
             else:
-                print(f"Skipping merge because PR creation might have failed or was manual: {pr_url}")
+                print(f"Skipping CI check and merge because PR creation might have failed or PR URL is invalid: {pr_url}")
         else:
-            print(f"Skipping merge because sandbox tests failed (conceptually) for branch {created_branch}.")
+            print(f"Skipping CI check and merge because sandbox tests failed (conceptually) for branch {created_branch}.")
 
         # Clean up: delete the local test branch
         # Remote branch deletion would typically happen if PR is merged and "delete branch on merge" is set,
