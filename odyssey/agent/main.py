@@ -74,6 +74,12 @@ class AppSettings(BaseSettings):
     repo_path: str = "." # Default to current directory, can be overridden by env
     SELF_MOD_APPROVAL_MODE: str = "manual" # Options: 'manual' (default), 'auto'
 
+    # Sandbox settings
+    SANDBOX_HEALTH_CHECK_ENDPOINT: str = "/health"
+    SANDBOX_APP_PORT_IN_CONTAINER: int = 8000
+    SANDBOX_HOST_PORT_FOR_HEALTH_CHECK: int = 18765 # Should be unique if multiple tests run in parallel
+    SANDBOX_DEFAULT_TEST_COMMAND: str = "python -m unittest discover -s ./tests" # Store as string, parse in task
+
     # For .env file loading by Pydantic-Settings
     class Config:
         env_file = ".env"

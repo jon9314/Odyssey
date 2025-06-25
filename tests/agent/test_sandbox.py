@@ -6,10 +6,22 @@ from odyssey.agent.sandbox import Sandbox
 
 class TestSandboxDockerValidation(unittest.TestCase):
 
+    @patch('odyssey.agent.sandbox.requests.get') # Mock requests for health check
     @patch('odyssey.agent.sandbox.os.path.exists')
-    @patch('odyssey.agent.sandbox.subprocess.run') # Mock subprocess.run used by _run_docker_command
-    def test_run_validation_in_docker_success(self, mock_subprocess_run, mock_os_path_exists):
-        sandbox = Sandbox()
+    @patch('odyssey.agent.sandbox.subprocess.run')
+    def test_run_validation_in_docker_success(self, mock_subprocess_run, mock_os_path_exists, mock_requests_get):
+        # Configure sandbox with specific test values
+        test_health_endpoint = "/custom/health"
+        test_app_port = 8080
+        test_host_port = 12345
+        test_cmd_list = ["custom_test_runner", "--verbose"]
+
+        sandbox = Sandbox(
+            health_check_endpoint=test_health_endpoint,
+            app_port_in_container=test_app_port,
+            host_port_for_health_check=test_host_port,
+            test_command=test_cmd_list
+        )
         repo_clone_path = "/test/repo_clone"
         proposal_id = "prop_docker_001"
 
@@ -40,51 +52,70 @@ class TestSandboxDockerValidation(unittest.TestCase):
         mock_rmi_result = MagicMock()
         mock_rmi_result.returncode = 0
 
+        # Mock for `docker exec` (test execution)
+        mock_exec_result = MagicMock()
+        mock_exec_result.returncode = 0
+        mock_exec_result.stdout = "Tests executed, all good."
+        mock_exec_result.stderr = ""
+
         mock_subprocess_run.side_effect = [
-            mock_build_result,  # docker build
-            mock_run_result,    # docker run
-            # Health check and test execution are simulated internally for now.
-            # If they used _run_docker_command, they would be here.
-            mock_stop_result,   # docker stop
-            mock_rm_result,     # docker rm
-            mock_rmi_result     # docker rmi
+            mock_build_result,    # docker build
+            mock_run_result,      # docker run
+            mock_exec_result,     # docker exec (for tests)
+            mock_stop_result,     # docker stop
+            mock_rm_result,       # docker rm
+            mock_rmi_result       # docker rmi
         ]
 
-        # Patch random.choice if relying on its simulation for pass/fail
-        with patch('odyssey.agent.sandbox.random.choice', return_value=True): # Force simulated test pass
-            success, output_log = sandbox.run_validation_in_docker(repo_clone_path, proposal_id)
+        # Mock requests.get for health check
+        mock_health_response = MagicMock()
+        mock_health_response.status_code = 200
+        mock_requests_get.return_value = mock_health_response
+
+        success, output_log = sandbox.run_validation_in_docker(repo_clone_path, proposal_id)
 
         self.assertTrue(success)
         self.assertIn("Image built successfully", output_log)
-        self.assertIn("containerid1234567890abcdef", output_log) # Check if container ID from run is in log
-        self.assertIn("(Simulated) Tests passed inside Docker container", output_log)
+        self.assertIn("containerid1234567890abcdef", output_log)
+        self.assertIn(f"Health check PASSED. Status: 200", output_log)
+        self.assertIn("Tests PASSED inside Docker container.", output_log)
+        self.assertIn("Test execution STDOUT:\nTests executed, all good.", output_log)
         self.assertIn("Cleaning up container", output_log)
         self.assertIn("Cleaning up image", output_log)
 
         expected_image_name_part = f"odyssey-proposal-{proposal_id.replace('_', '-')}"
 
-        # Check calls to subprocess_run (indirectly via _run_docker_command)
-        self.assertGreaterEqual(mock_subprocess_run.call_count, 4) # build, run, stop, rm, rmi (at least 4, maybe 5 if rmi is distinct)
+        # Check calls
+        self.assertEqual(mock_subprocess_run.call_count, 6) # build, run, exec, stop, rm, rmi
 
-        # Example of checking a specific call more carefully:
-        build_call = call(['docker', 'build', '-t', unittest.mock.ANY, '.'], cwd=repo_clone_path, capture_output=True, text=True, check=False)
-        # Check if ANY of the calls to subprocess_run matches this.
-        # This is a bit tricky because the image name has a random hex.
-        # A more robust check would be to capture the image name from the call.
-        # For now, check essential parts.
-        # Check that a build command was made
-        found_build_call = False
-        for c in mock_subprocess_run.call_args_list:
-            args, kwargs = c
-            if args[0][0] == 'docker' and args[0][1] == 'build' and args[0][3].startswith(expected_image_name_part) and kwargs.get('cwd') == repo_clone_path:
-                found_build_call = True
+        # Check docker run includes correct port mapping
+        run_cmd_found = False
+        for c_args, c_kwargs in mock_subprocess_run.call_args_list:
+            cmd_list = c_args[0]
+            if "docker" in cmd_list and "run" in cmd_list:
+                self.assertIn("-p", cmd_list)
+                self.assertIn(f"{test_host_port}:{test_app_port}", cmd_list)
+                run_cmd_found = True
                 break
-        self.assertTrue(found_build_call, "Docker build command not called as expected.")
+        self.assertTrue(run_cmd_found, "Docker run command did not include expected port mapping.")
+
+        # Check health check call
+        mock_requests_get.assert_called_once_with(f"http://localhost:{test_host_port}{test_health_endpoint}", timeout=3)
+
+        # Check docker exec uses the configured test_command
+        exec_cmd_found = False
+        for c_args, c_kwargs in mock_subprocess_run.call_args_list:
+            cmd_list = c_args[0]
+            if "docker" in cmd_list and "exec" in cmd_list:
+                self.assertEqual(cmd_list[-len(test_cmd_list):], test_cmd_list)
+                exec_cmd_found = True
+                break
+        self.assertTrue(exec_cmd_found, "Docker exec command did not use the configured test_command.")
 
 
     @patch('odyssey.agent.sandbox.os.path.exists')
     def test_run_validation_no_dockerfile(self, mock_os_path_exists):
-        sandbox = Sandbox()
+        sandbox = Sandbox() # Uses default constructor values
         repo_clone_path = "/test/repo_clone_no_dockerfile"
         proposal_id = "prop_docker_002"
         mock_os_path_exists.return_value = False # Dockerfile does not exist

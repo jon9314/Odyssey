@@ -11,28 +11,58 @@ logger = logging.getLogger(__name__)
 
 class Sandbox:
     def __init__(self):
-        logger.info("Sandbox initialized.")
+import os
+import logging
+import shutil # For checking Dockerfile path more easily
+import time # For health check delays
+import requests # For actual health checks
 
-    def _run_docker_command(self, command: list, cwd: str = None) -> tuple[bool, str, str]:
+logger = logging.getLogger(__name__)
+
+# Default settings for validation, can be overridden or made configurable
+DEFAULT_HEALTH_CHECK_ENDPOINT = "/health"
+DEFAULT_APP_PORT_IN_CONTAINER = 8000 # Assuming the app inside Docker exposes on this
+DEFAULT_HOST_PORT_FOR_HEALTH_CHECK = 18765 # Arbitrary host port for temporary mapping
+DEFAULT_TEST_COMMAND = ["python", "-m", "unittest", "discover", "-s", "./tests"] # Example
+
+class Sandbox:
+    def __init__(self,
+                 health_check_endpoint: str = DEFAULT_HEALTH_CHECK_ENDPOINT,
+                 app_port_in_container: int = DEFAULT_APP_PORT_IN_CONTAINER,
+                 host_port_for_health_check: int = DEFAULT_HOST_PORT_FOR_HEALTH_CHECK,
+                 test_command: list[str] = None
+                 ):
+        logger.info("Sandbox initialized.")
+        self.health_check_endpoint = health_check_endpoint
+        self.app_port_in_container = app_port_in_container
+        self.host_port_for_health_check = host_port_for_health_check
+        self.test_command = test_command if test_command is not None else DEFAULT_TEST_COMMAND.copy()
+
+
+    def _run_docker_command(self, command: list, cwd: str = None, timeout: int = 300) -> tuple[bool, str, str]:
         """
-        Helper to run Docker commands.
+        Helper to run Docker commands with a timeout.
         Returns (success, stdout, stderr).
         """
         try:
-            logger.debug(f"Running Docker command: {' '.join(command)} in {cwd or 'current dir'}")
+            logger.debug(f"Running Docker command: {' '.join(command)} in {cwd or 'current dir'} with timeout {timeout}s")
             process = subprocess.run(
                 command,
                 cwd=cwd,
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                timeout=timeout
             )
             if process.returncode == 0:
-                logger.debug(f"Docker command successful. STDOUT: {process.stdout[:200]}")
+                logger.debug(f"Docker command successful. STDOUT: {process.stdout[:500]}") # Log more stdout
                 return True, process.stdout.strip(), process.stderr.strip()
             else:
                 logger.error(f"Docker command failed. RC: {process.returncode}. STDERR: {process.stderr}. STDOUT: {process.stdout}")
                 return False, process.stdout.strip(), process.stderr.strip()
+        except subprocess.TimeoutExpired:
+            logger.error(f"Docker command {' '.join(command)} timed out after {timeout}s.")
+            return False, "", f"Command timed out after {timeout}s."
         except FileNotFoundError:
             logger.error("Docker command not found. Is Docker installed and in PATH?")
             return False, "", "Docker command not found."
@@ -47,130 +77,113 @@ class Sandbox:
         :param proposal_id: A unique identifier for the proposal (used for image/container naming).
         :return: Tuple (success: bool, output_log: str)
         """
-        output_log = []
+        output_log_lines = []
         image_name = f"odyssey-proposal-{proposal_id.replace('_', '-')}-{os.urandom(4).hex()}"
         container_name = f"{image_name}-container"
-        success = False
+        overall_success = False # Assume failure until all steps pass
+        build_success_flag = False # To track if image should be cleaned up
 
+        def log_and_append(message: str, level: str = "info"):
+            if level == "info": logger.info(f"[{proposal_id}] {message}")
+            elif level == "warning": logger.warning(f"[{proposal_id}] {message}")
+            elif level == "error": logger.error(f"[{proposal_id}] {message}")
+            output_log_lines.append(message)
+
+        log_and_append(f"Starting Docker validation for proposal: {proposal_id}", "info")
         dockerfile_path = os.path.join(repo_clone_path, "Dockerfile")
         if not os.path.exists(dockerfile_path):
-            msg = "Dockerfile not found at the root of the repository clone. Cannot proceed with Docker validation."
-            logger.warning(f"[{proposal_id}] {msg}")
-            output_log.append(f"ERROR: {msg}")
-            return False, "\n".join(output_log)
+            msg = "Dockerfile not found at the root of the repository clone. Cannot proceed."
+            log_and_append(f"ERROR: {msg}", "warning")
+            return False, "\n".join(output_log_lines)
 
         try:
             # 1. Build Docker Image
-            output_log.append(f"Attempting to build Docker image: {image_name} from path: {repo_clone_path}")
-            logger.info(f"[{proposal_id}] Building Docker image: {image_name}")
-            build_success, stdout, stderr = self._run_docker_command(
-                ["docker", "build", "-t", image_name, "."], cwd=repo_clone_path
+            log_and_append(f"STEP 1: Building Docker image: {image_name} from path: {repo_clone_path}", "info")
+            build_success_flag, stdout, stderr = self._run_docker_command(
+                ["docker", "build", "--pull", "-t", image_name, "."], cwd=repo_clone_path, timeout=600 # 10 min build timeout
             )
-            output_log.append(f"Docker build STDOUT:\n{stdout}")
-            output_log.append(f"Docker build STDERR:\n{stderr}")
-            if not build_success:
-                msg = f"Docker image build failed for {image_name}."
-                logger.error(f"[{proposal_id}] {msg}")
-                output_log.append(f"ERROR: {msg}")
-                return False, "\n".join(output_log)
-            logger.info(f"[{proposal_id}] Docker image {image_name} built successfully.")
+            log_and_append(f"Docker build STDOUT:\n{stdout}\nDocker build STDERR:\n{stderr}", "debug")
+            if not build_success_flag:
+                log_and_append(f"ERROR: Docker image build failed for {image_name}.", "error")
+                return False, "\n".join(output_log_lines)
+            log_and_append(f"Docker image {image_name} built successfully.", "info")
 
-            # 2. Run Docker Container (example: detached mode for a service)
-            # This part is highly dependent on what the Docker image does.
-            # Assuming it starts a service that needs to be health-checked, then tests run via `docker exec`.
-            output_log.append(f"Attempting to run Docker container: {container_name} from image: {image_name}")
-            logger.info(f"[{proposal_id}] Running Docker container: {container_name}")
-            run_success, stdout, stderr = self._run_docker_command(
-                ["docker", "run", "--name", container_name, "-d", image_name] # Basic run, adjust ports/volumes as needed
-            )
-            output_log.append(f"Docker run STDOUT:\n{stdout}")
-            output_log.append(f"Docker run STDERR:\n{stderr}")
+            # 2. Run Docker Container
+            log_and_append(f"STEP 2: Running Docker container: {container_name} from image: {image_name}", "info")
+            # Map the app port to a host port for health check
+            docker_run_cmd = [
+                "docker", "run", "--name", container_name, "-d",
+                "-p", f"{self.host_port_for_health_check}:{self.app_port_in_container}",
+                image_name
+            ]
+            run_success, stdout, stderr = self._run_docker_command(docker_run_cmd)
+            log_and_append(f"Docker run STDOUT:\n{stdout}\nDocker run STDERR:\n{stderr}", "debug")
             if not run_success:
-                msg = f"Failed to start Docker container {container_name}."
-                logger.error(f"[{proposal_id}] {msg}")
-                output_log.append(f"ERROR: {msg}")
-                return False, "\n".join(output_log) # Cleanup of image will happen in finally
-            logger.info(f"[{proposal_id}] Docker container {container_name} started.")
+                log_and_append(f"ERROR: Failed to start Docker container {container_name}.", "error")
+                return False, "\n".join(output_log_lines)
+            log_and_append(f"Docker container {container_name} started.", "info")
 
-            # 3. Health Check (simulated)
-            # In a real scenario, ping an endpoint, check logs, etc.
-            output_log.append("Simulating health check for service in container...")
-            logger.info(f"[{proposal_id}] Simulating health check for {container_name}...")
-            time.sleep(5) # Give container time to start
-            health_check_passed = True # Placeholder
+            # 3. Health Check
+            log_and_append(f"STEP 3: Performing health check on container {container_name}...", "info")
+            health_check_url = f"http://localhost:{self.host_port_for_health_check}{self.health_check_endpoint}"
+            health_check_passed = False
+            max_retries = 12 # e.g., 12 retries * 5 seconds = 60 seconds timeout for health check
+            retry_delay = 5  # seconds
+            for i in range(max_retries):
+                log_and_append(f"Health check attempt {i+1}/{max_retries} at {health_check_url}...", "debug")
+                try:
+                    response = requests.get(health_check_url, timeout=3) # Short timeout for each attempt
+                    if response.status_code >= 200 and response.status_code < 300:
+                        health_check_passed = True
+                        log_and_append(f"Health check PASSED. Status: {response.status_code}", "info")
+                        break
+                    else:
+                        log_and_append(f"Health check attempt failed. Status: {response.status_code}. Response: {response.text[:100]}", "warning")
+                except requests.ConnectionError:
+                    log_and_append("Health check attempt failed: Connection error.", "warning")
+                except requests.Timeout:
+                    log_and_append("Health check attempt failed: Timeout.", "warning")
+                time.sleep(retry_delay)
+
             if not health_check_passed:
-                msg = "Service health check failed."
-                logger.warning(f"[{proposal_id}] {msg}")
-                output_log.append(f"WARNING: {msg}")
-                # Decide if this is a hard failure or if tests should still run
-            else:
-                output_log.append("Health check passed (simulated).")
-                logger.info(f"[{proposal_id}] Health check passed for {container_name} (simulated).")
-
+                log_and_append("ERROR: Service health check FAILED after multiple retries.", "error")
+                # Consider this a fatal error for the validation
+                return False, "\n".join(output_log_lines)
 
             # 4. Execute Tests within the container
-            # This assumes a test command is known (e.g., defined in project or a standard command)
-            # For example: `pytest`, `npm test`, or a custom script `run_tests_in_container.sh`
-            test_command_in_container = ["python", "-m", "unittest", "discover", "-s", "./tests"] # Example Python tests
-            # test_command_in_container = ["./scripts/run_container_tests.sh"] # Example custom script
+            log_and_append(f"STEP 4: Executing tests in container {container_name} with command: {' '.join(self.test_command)}", "info")
+            test_exec_success, stdout_test, stderr_test = self._run_docker_command(
+                ["docker", "exec", container_name] + self.test_command,
+                timeout=600 # 10 min test timeout
+            )
+            log_and_append(f"Test execution STDOUT:\n{stdout_test}\nTest execution STDERR:\n{stderr_test}", "debug")
 
-            output_log.append(f"Attempting to execute tests in container: {' '.join(test_command_in_container)}")
-            logger.info(f"[{proposal_id}] Executing tests in {container_name}: {' '.join(test_command_in_container)}")
-
-            # Simulating test execution for now as actual command depends on project structure
-            # In a real scenario:
-            # test_exec_success, stdout_test, stderr_test = self._run_docker_command(
-            #     ["docker", "exec", container_name] + test_command_in_container
-            # )
-            # output_log.append(f"Test execution STDOUT:\n{stdout_test}")
-            # output_log.append(f"Test execution STDERR:\n{stderr_test}")
-            # if not test_exec_success:
-            #     msg = "Tests failed inside the Docker container."
-            #     logger.warning(f"[{proposal_id}] {msg}")
-            #     output_log.append(f"ERROR: {msg}")
-            #     # success remains False (from initialization)
-            # else:
-            #     logger.info(f"[{proposal_id}] Tests passed inside Docker container.")
-            #     output_log.append("Tests passed inside Docker container.")
-            #     success = True # Tests passed!
-
-            # Simulated test outcome:
-            import random
-            import time # Ensure time is imported
-            time.sleep(5) # Simulate test execution time
-            if random.choice([True, True, False]): # Higher chance of success for demo
-                logger.info(f"[{proposal_id}] (Simulated) Tests passed inside Docker container.")
-                output_log.append("(Simulated) Tests passed inside Docker container.")
-                success = True
+            if not test_exec_success:
+                log_and_append("ERROR: Tests FAILED inside the Docker container.", "error")
+                # overall_success remains False
             else:
-                logger.warning(f"[{proposal_id}] (Simulated) Tests failed inside the Docker container.")
-                output_log.append("(Simulated) ERROR: Tests failed inside Docker container. Check logs for details.")
-                # success remains False
+                log_and_append("Tests PASSED inside Docker container.", "info")
+                overall_success = True # All critical steps passed
 
         except Exception as e:
             msg = f"Unhandled exception during Docker validation: {e}"
-            logger.error(f"[{proposal_id}] {msg}", exc_info=True)
-            output_log.append(f"CRITICAL ERROR: {msg}")
-            success = False
+            log_and_append(f"CRITICAL ERROR: {msg}", "error")
+            logger.error(f"[{proposal_id}] {msg}", exc_info=True) # Also log with traceback
+            overall_success = False
         finally:
             # 5. Cleanup
-            if container_name: # Check if container was attempted to be named/run
-                logger.info(f"[{proposal_id}] Cleaning up container: {container_name}")
-                stop_success, _, _ = self._run_docker_command(["docker", "stop", container_name])
-                if stop_success: logger.debug(f"[{proposal_id}] Stopped container {container_name}")
-                else: logger.warning(f"[{proposal_id}] Failed to stop container {container_name} (it might not have been running).")
+            log_and_append(f"STEP 5: Cleaning up Docker resources for {proposal_id}...", "info")
+            if container_name:
+                log_and_append(f"Stopping and removing container: {container_name}", "debug")
+                self._run_docker_command(["docker", "stop", container_name], timeout=60) # Give time to stop
+                self._run_docker_command(["docker", "rm", container_name], timeout=60)
 
-                rm_success, _, _ = self._run_docker_command(["docker", "rm", container_name])
-                if rm_success: logger.debug(f"[{proposal_id}] Removed container {container_name}")
-                else: logger.warning(f"[{proposal_id}] Failed to remove container {container_name} (it might have already been removed).")
+            if image_name and build_success_flag: # Only remove image if build was successful
+                log_and_append(f"Removing image: {image_name}", "debug")
+                self._run_docker_command(["docker", "rmi", "-f", image_name], timeout=120) # Force remove if needed
 
-            if image_name and build_success: # Only remove image if build was successful and name is known
-                logger.info(f"[{proposal_id}] Cleaning up image: {image_name}")
-                rmi_success, _, _ = self._run_docker_command(["docker", "rmi", image_name])
-                if rmi_success: logger.debug(f"[{proposal_id}] Removed image {image_name}")
-                else: logger.warning(f"[{proposal_id}] Failed to remove image {image_name}.")
-
-        return success, "\n".join(output_log)
+        log_and_append(f"Docker validation finished. Overall success: {overall_success}", "info")
+        return overall_success, "\n".join(output_log_lines)
 
     def run_code(self, code_string, language="python"):
         """

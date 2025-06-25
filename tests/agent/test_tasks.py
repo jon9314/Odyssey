@@ -51,6 +51,12 @@ class TestSelfModificationTasks(unittest.TestCase):
         mock_settings_instance = mock_app_settings_cls.return_value
         mock_settings_instance.memory_db_path = "dummy_db.sqlite"
         mock_settings_instance.repo_path = mock_repo_path
+        # Provide mock values for new AppSettings related to Sandbox
+        mock_settings_instance.SANDBOX_HEALTH_CHECK_ENDPOINT = "/testhealth"
+        mock_settings_instance.SANDBOX_APP_PORT_IN_CONTAINER = 9000
+        mock_settings_instance.SANDBOX_HOST_PORT_FOR_HEALTH_CHECK = 19999
+        mock_settings_instance.SANDBOX_DEFAULT_TEST_COMMAND = "pytest --ci"
+
 
         mock_mm_instance = mock_memory_manager_cls.return_value
         mock_mm_instance.get_proposal_log.return_value = {
@@ -58,27 +64,25 @@ class TestSelfModificationTasks(unittest.TestCase):
             'commit_message': original_commit_msg, 'status': 'proposed'
         }
 
-        # Mock for the SelfModifier instance used for the temporary clone
         mock_sm_local_instance = MagicMock()
         mock_sm_local_instance.checkout_branch.return_value = True
-        # This SM instance will have its own sandbox_manager (a Sandbox instance)
-        # Its sandbox_test method will be called.
         mock_sm_local_instance.sandbox_test.return_value = (True, "Docker validation passed via mock")
 
-        # SelfModifier class mock will return our sm_local_instance when called with temp_repo_dir
-        # The key is how SelfModifier is instantiated in the task now.
-        # The task does: sandbox_manager_instance = Sandbox(); local_self_modifier = SelfModifier(repo_path=temp_repo_dir, sandbox_manager=sandbox_manager_instance)
-        # So, we need mock_self_modifier_cls to return mock_sm_local_instance when its __init__ is called.
-        mock_self_modifier_cls.return_value = mock_sm_local_instance
+        # Side effect for SelfModifier to return the correct instance
+        def self_modifier_side_effect(repo_path, sandbox_manager):
+            if repo_path == mock_temp_dir:
+                # This is the local_self_modifier for the temp clone
+                # It should have been passed a Sandbox instance.
+                self.assertIsNotNone(sandbox_manager, "Sandbox manager should be passed to local SelfModifier")
+                return mock_sm_local_instance
+            # Could return a different mock for other SelfModifier instantiations if any
+            return MagicMock()
+        mock_self_modifier_cls.side_effect = self_modifier_side_effect
 
-        # Mock for Sandbox instantiation within the task
-        mock_sandbox_instance = mock_sandbox_cls.return_value
-        # We don't need to mock methods on mock_sandbox_instance directly here if we mock
-        # SelfModifier's sandbox_test method's return value, which is simpler for this test.
-        # However, the task instantiates Sandbox() then passes it to SelfModifier.
-        # So SelfModifier(..., sandbox_manager=mock_sandbox_instance) will be called.
+        # Capture the Sandbox instance passed to SelfModifier
+        # We need to assert that Sandbox() was called with the settings from AppSettings
+        # This is done by checking the arguments to its constructor via mock_sandbox_cls.
 
-        # Mock subprocess.run for git clone
         mock_clone_result = MagicMock()
         mock_clone_result.returncode = 0
         mock_clone_result.stdout = "Cloned successfully"
@@ -100,8 +104,18 @@ class TestSelfModificationTasks(unittest.TestCase):
             capture_output=True, text=True, check=False
         )
 
+        # Assert Sandbox was instantiated with values from AppSettings
+        mock_sandbox_cls.assert_called_once_with(
+            health_check_endpoint="/testhealth",
+            app_port_in_container=9000,
+            host_port_for_health_check=19999,
+            test_command=["pytest", "--ci"]
+        )
+
         # Check SelfModifier instantiation for the local clone
-        mock_self_modifier_cls.assert_called_with(repo_path=mock_temp_dir, sandbox_manager=mock_sandbox_instance)
+        # The side_effect for mock_self_modifier_cls handles returning mock_sm_local_instance
+        # We can check it was called with the sandbox instance created by mock_sandbox_cls
+        mock_self_modifier_cls.assert_called_with(repo_path=mock_temp_dir, sandbox_manager=mock_sandbox_cls.return_value)
 
         # Check calls on the local SelfModifier instance
         mock_sm_local_instance._run_git_command.assert_called_with(["fetch", "origin"], raise_on_error=False)

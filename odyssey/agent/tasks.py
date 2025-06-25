@@ -253,9 +253,21 @@ def run_sandbox_validation_task(self, proposal_id: str, branch_name: str) -> Dic
         # 3. Fetch and checkout the specific proposal branch
         logger.info(f"{log_prefix} Fetching and checking out branch '{branch_name}' in temporary clone.")
 
+import shlex # For parsing command strings safely
+
         # Initialize SelfModifier with the path to the temporary clone.
-        # Also pass the sandbox_manager instance to this SelfModifier.
-        sandbox_manager_instance = Sandbox() # Create a Sandbox instance for this task
+        # Also pass the sandbox_manager instance to this SelfModifier, configured from AppSettings.
+
+        # Parse the test command string from settings into a list
+        # Using shlex.split for safer parsing of command strings that might include quotes or spaces.
+        test_command_list = shlex.split(settings.SANDBOX_DEFAULT_TEST_COMMAND)
+
+        sandbox_manager_instance = Sandbox(
+            health_check_endpoint=settings.SANDBOX_HEALTH_CHECK_ENDPOINT,
+            app_port_in_container=settings.SANDBOX_APP_PORT_IN_CONTAINER,
+            host_port_for_health_check=settings.SANDBOX_HOST_PORT_FOR_HEALTH_CHECK,
+            test_command=test_command_list
+        )
         local_self_modifier = SelfModifier(repo_path=temp_repo_dir, sandbox_manager=sandbox_manager_instance)
 
         # Checkout the branch in the temporary directory.
