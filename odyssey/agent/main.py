@@ -27,7 +27,8 @@ from odyssey.api.routes import (
     get_memory_manager as get_memory_manager_dependency,
     get_ollama_client as get_ollama_client_dependency,
     get_tool_manager as get_tool_manager_dependency,
-    get_self_modifier as get_self_modifier_dependency # Import SelfModifier dependency
+    get_self_modifier as get_self_modifier_dependency, # Import SelfModifier dependency
+    memory_router # Import the new memory_router
 )
 # Configure basic logging
 # This will be the root logger configuration. Specific module loggers can be retrieved via `logging.getLogger(__name__)`.
@@ -270,7 +271,8 @@ async def health_check_endpoint(request: Request): # Added Request for logging c
 # --- Mount API Routers (for more complex APIs) ---
 # This should come after root and health typically, or ensure paths don't clash.
 # Main application/utility API router (from existing structure)
-app.include_router(api_main_router, prefix="/api/v1", tags=["Main API Endpoints"])
+app.include_router(api_main_router, prefix="/api/v1", tags=["Core Agent & Task Endpoints"]) # Renamed tag for clarity
+app.include_router(memory_router, prefix="/api/v1", tags=["Memory Management"]) # Added memory_router
 
 # Agent-specific API router (if you create one, e.g., for tasks, agent control)
 # app.include_router(agent_api_router, prefix="/api/v1/agent", tags=["Agent Management"])

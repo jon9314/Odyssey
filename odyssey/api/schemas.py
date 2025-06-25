@@ -144,6 +144,35 @@ class AsyncTaskStatusResponse(BaseModel):
     traceback: Optional[str] = Field(None, description="Full traceback if the task failed.") # For detailed error info
 
 
+# --- Semantic Memory Schemas ---
+class SemanticAddRequest(BaseModel):
+    text: str = Field(..., min_length=1, example="The agent observed a new pattern in the data.")
+    metadata: Dict[str, Any] = Field(default_factory=dict, example={"source": "observation", "timestamp": "2023-11-16T10:00:00Z"})
+    id: Optional[str] = Field(None, example="obs_pattern_001")
+
+class SemanticAddResponse(BaseModel):
+    id: str = Field(..., example="obs_pattern_001")
+    message: str = Field("Semantic entry added successfully.", example="Semantic entry added successfully.")
+
+class SemanticQueryRequest(BaseModel):
+    query_text: str = Field(..., min_length=1, example="patterns in data")
+    top_k: Optional[int] = Field(5, gt=0, example=3)
+    metadata_filter: Optional[Dict[str, Any]] = Field(None, example={"source": "observation"})
+
+class SemanticQueryResponseItem(BaseModel):
+    id: str
+    text: str
+    metadata: Dict[str, Any]
+    distance: Optional[float] = None # ChromaDB includes this
+
+class SemanticQueryResponse(BaseModel):
+    results: List[SemanticQueryResponseItem]
+
+class SemanticErrorResponse(BaseModel): # Can be used if vector store is unavailable
+    error: str
+    detail: Optional[str] = None
+
+
 # --- Self Modification Schemas ---
 class ProposeChangeRequestSchema(BaseModel):
     files_content: Dict[str, str] = Field(..., example={"src/main.py": "print('Hello, World!')"})

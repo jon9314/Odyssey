@@ -34,7 +34,8 @@ from .schemas import (
     LLMAskRequest, LLMAskResponse, # LLM Schemas
     AddNumbersTaskRequest, SimulateLongTaskRequest, # Specific Celery task requests
     AsyncTaskResponse, AsyncTaskStatusResponse, # Generic Celery task responses
-    ProposeChangeRequestSchema, ProposalResponseSchema, ProposalStatusResponseSchema # Self Modification Schemas
+    ProposeChangeRequestSchema, ProposalResponseSchema, ProposalStatusResponseSchema, # Self Modification Schemas
+    SemanticAddRequest, SemanticAddResponse, SemanticQueryRequest, SemanticQueryResponse, SemanticQueryResponseItem, SemanticErrorResponse # Semantic Memory Schemas
 )
 import logging # For logging within route handlers if needed
 import uuid # For generating proposal IDs
@@ -765,6 +766,117 @@ async def reject_proposal_endpoint(
 # pr_url=f"http://github.com/mock-org/odyssey/pull/{(len(os.urandom(1)) % 5) + 1}"
 # )
 # This section will be deleted.
+
+# --- Semantic Memory Endpoints ---
+# Creating a new router for memory specific endpoints for better organization
+memory_router = APIRouter(prefix="/memory", tags=["Memory Management"])
+
+@memory_router.post(
+    "/semantic/add",
+    response_model=SemanticAddResponse,
+    responses={
+        201: {"model": SemanticAddResponse, "description": "Entry added successfully"},
+        400: {"model": SemanticErrorResponse, "description": "Invalid request (e.g., missing text)"},
+        500: {"model": SemanticErrorResponse, "description": "Internal server error adding entry"},
+        503: {"model": SemanticErrorResponse, "description": "Vector store unavailable"}
+    },
+    status_code=201
+)
+async def add_semantic_entry(
+    request_data: SemanticAddRequest,
+    memory: MemoryManager = Depends(get_memory_manager)
+):
+    """Adds a new entry (text and metadata) to the semantic memory (vector store)."""
+    logger.info(f"API: Received request to add semantic entry. Text snippet: '{request_data.text[:100]}...' ID: {request_data.id or 'Not provided'}")
+    if not memory.vector_store:
+        logger.warning("API: Vector store not available. Cannot add semantic entry.")
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Vector store unavailable", "detail": "The vector store is not initialized or not accessible."}
+        )
+
+    try:
+        added_id = memory.add_semantic_memory_event(
+            text=request_data.text,
+            metadata=request_data.metadata,
+            event_id=request_data.id # Pass the ID if provided
+        )
+        if added_id:
+            logger.info(f"API: Semantic entry added successfully with ID: {added_id}")
+            return SemanticAddResponse(id=added_id, message="Semantic entry added successfully.")
+        else:
+            # This case might occur if add_semantic_memory_event returns None without raising an exception
+            # e.g. if the vector_store.add_documents itself returned an unexpected result.
+            logger.error("API: Failed to add semantic entry, MemoryManager.add_semantic_memory_event returned None or mismatched ID.")
+            raise HTTPException(
+                status_code=500,
+                detail={"error": "Failed to add semantic entry", "detail": "Internal error occurred while adding to vector store, ID not confirmed."}
+            )
+    except Exception as e: # Catch exceptions from add_semantic_memory_event or underlying vector_store
+        logger.error(f"API: Exception while adding semantic entry: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to add semantic entry", "detail": str(e)}
+        )
+
+@memory_router.post(
+    "/semantic/query",
+    response_model=SemanticQueryResponse, # On success
+    responses={
+        200: {"model": SemanticQueryResponse, "description": "Query successful"},
+        400: {"model": SemanticErrorResponse, "description": "Invalid request (e.g., missing query_text)"},
+        500: {"model": SemanticErrorResponse, "description": "Internal server error during query"},
+        503: {"model": SemanticErrorResponse, "description": "Vector store unavailable"}
+    }
+)
+async def query_semantic_entries(
+    request_data: SemanticQueryRequest,
+    memory: MemoryManager = Depends(get_memory_manager)
+):
+    """Queries the semantic memory for entries similar to the query_text."""
+    logger.info(f"API: Received semantic query. Query text snippet: '{request_data.query_text[:100]}...' Top_k: {request_data.top_k}, Filter: {request_data.metadata_filter}")
+    if not memory.vector_store:
+        logger.warning("API: Vector store not available. Cannot query semantic entries.")
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Vector store unavailable", "detail": "The vector store is not initialized or not accessible."}
+        )
+
+    try:
+        results_from_mm = memory.semantic_search(
+            query_text=request_data.query_text,
+            top_k=request_data.top_k or 5, # Ensure top_k has a default if not provided by Pydantic
+            metadata_filter=request_data.metadata_filter
+        )
+
+        # MemoryManager.semantic_search now returns a list of dicts, or a list containing an error dict.
+        if results_from_mm and isinstance(results_from_mm, list) and len(results_from_mm) > 0 and "error" in results_from_mm[0]:
+            err_detail = results_from_mm[0].get("detail", results_from_mm[0]["error"])
+            logger.warning(f"API: Semantic search from MemoryManager indicated an error: {err_detail}")
+            # Determine appropriate status code based on error if possible, else 500
+            status_code = 503 if "not available" in err_detail.lower() else 500
+            raise HTTPException(
+                status_code=status_code,
+                detail={"error": "Semantic query failed", "detail": err_detail}
+            )
+
+        # Convert to SemanticQueryResponseItem. This assumes MemoryManager.semantic_search
+        # returns dicts directly compatible with SemanticQueryResponseItem schema.
+        response_items = [SemanticQueryResponseItem(**item) for item in results_from_mm]
+        logger.info(f"API: Semantic query returned {len(response_items)} results.")
+        return SemanticQueryResponse(results=response_items)
+
+    except HTTPException: # Re-raise HTTPExceptions (e.g. from the 503 check above)
+        raise
+    except Exception as e: # Catch other unexpected errors
+        logger.error(f"API: Exception during semantic query: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to query semantic memory", "detail": str(e)}
+        )
+
+# The main router in main.py will need to include this memory_router
+# router.include_router(memory_router) # This should be done in main.py where `app` is defined.
 
 # --- End of File ---
 # async def read_items(skip: int = 0, limit: int = 10):

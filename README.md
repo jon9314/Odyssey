@@ -436,3 +436,72 @@ for res in results:
 ```
 
 This system provides a powerful way for Odyssey to build and utilize a rich, context-aware memory.
+
+#### API Access for Semantic Memory
+
+You can interact with the semantic memory via the following API endpoints:
+
+*   **`POST /api/v1/memory/semantic/add`**
+    *   **Description:** Adds a new text entry with associated metadata to the vector store.
+    *   **Request Body (`SemanticAddRequest`):**
+        ```json
+        {
+          "text": "The agent discovered a new planetary system in the Andromeda galaxy.",
+          "metadata": {"source": "astronomy_log", "discovery_type": "planetary_system", "year": 2024},
+          "id": "optional_unique_id_for_this_entry"
+        }
+        ```
+        *(Note: `id` is optional; if not provided, one will be generated.)*
+    *   **Response (201 Created - `SemanticAddResponse`):**
+        ```json
+        {
+          "id": "generated_or_provided_id",
+          "message": "Semantic entry added successfully."
+        }
+        ```
+    *   **Curl Example:**
+        ```bash
+        curl -X POST -H "Content-Type: application/json" \
+        -d '{
+          "text": "Agent status nominal after system update.",
+          "metadata": {"type": "system_status", "component": "core_agent"}
+        }' \
+        http://localhost:8000/api/v1/memory/semantic/add | jq
+        ```
+
+*   **`POST /api/v1/memory/semantic/query`**
+    *   **Description:** Queries the vector store for entries semantically similar to the `query_text`.
+    *   **Request Body (`SemanticQueryRequest`):**
+        ```json
+        {
+          "query_text": "recent system anomalies or errors",
+          "top_k": 3,
+          "metadata_filter": {"type": "system_error"}
+        }
+        ```
+        *(Note: `top_k` defaults to 5, `metadata_filter` is optional.)*
+    *   **Response (200 OK - `SemanticQueryResponse`):**
+        ```json
+        {
+          "results": [
+            {
+              "id": "error_billing_001",
+              "text": "A critical error occurred in the billing module during an update.",
+              "metadata": {"type": "system_error", "module": "billing", "severity": "critical"},
+              "distance": 0.12345
+            }
+            // ... other similar results up to top_k
+          ]
+        }
+        ```
+    *   **Curl Example:**
+        ```bash
+        curl -X POST -H "Content-Type: application/json" \
+        -d '{
+          "query_text": "agent activities related to data analysis",
+          "top_k": 2
+        }' \
+        http://localhost:8000/api/v1/memory/semantic/query | jq
+        ```
+
+*(For error responses, such as when the vector store is unavailable (503) or for bad requests (400), the API will return a JSON object like `{"error": "Error message", "detail": "Optional further details"}`.)*
