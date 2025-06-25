@@ -58,6 +58,7 @@ python-dotenv # For loading .env files (though pydantic-settings can also do thi
 # httpx # Modern async HTTP client, can replace 'requests' if fully async
 # PyYAML # For parsing YAML configuration files (pydantic-settings might handle this)
 # watchdog # For observing file system events (e.g., for hot reloading code)
+PyGithub # For GitHub API interaction
 
 # Add your project's specific dependencies here.
 # Example:

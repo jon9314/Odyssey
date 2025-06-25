@@ -3,27 +3,45 @@ import os
 import subprocess
 import importlib
 import logging
+from typing import Optional # Added Optional
+
+from odyssey.agent.github_client import GitHubClient # Import GitHubClient
 
 # Configure logging for this module
 logger = logging.getLogger(__name__)
 
 class SelfModifier:
-    def __init__(self, repo_path=".", github_token=None, sandbox_manager=None):
+    def __init__(self, repo_path=".", github_token: Optional[str] = None, github_repo_name: Optional[str] = None, sandbox_manager=None, main_branch_name: Optional[str] = None):
         """
         Initializes the SelfModifier.
         :param repo_path: Path to the Git repository (defaults to current directory).
-        :param github_token: GitHub Personal Access Token for PR operations.
-        :param sandbox_manager: An instance of a sandbox manager (e.g., from sandbox.py)
-                                 to run tests.
+        :param github_token: GitHub Personal Access Token for PR operations. Reads from GITHUB_TOKEN env var if None.
+        :param github_repo_name: GitHub repository name (e.g., "owner/repo"). Reads from GITHUB_REPOSITORY env var if None.
+        :param sandbox_manager: An instance of a sandbox manager (e.g., from sandbox.py) to run tests.
+        :param main_branch_name: The name of the main branch in the repository (e.g., "main", "master"). Reads from MAIN_BRANCH_NAME env var if None, defaults to "main".
         """
         self.repo_path = os.path.abspath(repo_path)
-        self.github_token = github_token  # TODO: Use this for actual GitHub API calls
+        self.github_token = github_token # Will be used by GitHubClient if provided
+        self.github_repo_name = github_repo_name # Will be used by GitHubClient if provided
         self.sandbox_manager = sandbox_manager
+        self.main_branch_name = main_branch_name or os.getenv("MAIN_BRANCH_NAME", "main")
+
+        self._gh_client: Optional[GitHubClient] = None
+        if self.github_token or os.getenv("GITHUB_TOKEN"): # Check if token is available directly or via env
+            try:
+                # Initialize GitHubClient. It will use env vars if specific args are None.
+                self._gh_client = GitHubClient(token=self.github_token, repo_name=self.github_repo_name)
+                logger.info("GitHubClient initialized successfully within SelfModifier.")
+            except ValueError as e:
+                logger.warning(f"Failed to initialize GitHubClient: {e}. PR features will be limited.")
+        else:
+            logger.info("GitHub token not provided. GitHubClient not initialized. PR features will rely on CLI or be manual.")
+
 
         if not self._is_git_repo():
             logger.warning(f"Path '{self.repo_path}' is not a Git repository. Some operations will fail.")
 
-        logger.info(f"SelfModifier initialized for repository: {self.repo_path}")
+        logger.info(f"SelfModifier initialized for repository: {self.repo_path}. Main branch: '{self.main_branch_name}'")
 
     def _is_git_repo(self) -> bool:
         """Checks if the repo_path is a valid Git repository."""
@@ -176,17 +194,19 @@ class SelfModifier:
         self.checkout_branch(current_branch)
 
         logger.info(f"Successfully proposed code changes on branch: {branch_name}")
-        return branch_name
+        # Return both branch name and original (base) branch for PR creation convenience
+        return branch_name, current_branch
 
-    def merge_branch(self, branch_to_merge: str, target_branch: str = "main", delete_branch_after_merge: bool = True) -> tuple[bool, str]:
+    def merge_branch(self, branch_to_merge: str, target_branch: Optional[str] = None, delete_branch_after_merge: bool = True) -> tuple[bool, str]:
         """
         Merges a specified branch into a target branch (e.g., main) and optionally deletes the merged branch.
         :param branch_to_merge: The name of the branch to merge.
-        :param target_branch: The branch to merge into (default: "main").
+        :param target_branch: The branch to merge into. Defaults to self.main_branch_name.
         :param delete_branch_after_merge: Whether to delete the local and remote merged branch (default: True).
         :return: Tuple (success: bool, message: str)
         """
-        logger.info(f"Attempting to merge branch '{branch_to_merge}' into '{target_branch}'.")
+        _target_branch = target_branch or self.main_branch_name
+        logger.info(f"Attempting to merge branch '{branch_to_merge}' into '{_target_branch}'.")
         if not self._is_git_repo():
             return False, "Not a Git repository."
 
@@ -253,60 +273,106 @@ class SelfModifier:
             self.checkout_branch(current_branch)
 
 
-    def open_pr(self, branch: str, title: str = None, body: str = None, base_branch: str = "main") -> str:
+    def create_pull_request(self, head_branch: str, base_branch: Optional[str] = None, title: Optional[str] = None, body: Optional[str] = None, proposal_id: Optional[str] = None) -> Optional[str]:
         """
-        Opens a Pull Request on GitHub for the given branch.
-        :param branch: The branch containing the changes.
-        :param title: Optional title for the PR. If None, uses the last commit message of the branch.
-        :param body: Optional body/description for the PR.
-        :param base_branch: The branch to open the PR against (e.g., 'main', 'develop').
-        :return: URL of the created PR, or an error message.
+        Opens a Pull Request on GitHub for the given branch using GitHubClient.
+        :param head_branch: The name of the branch where your changes are implemented.
+        :param base_branch: The name of the branch you want the changes pulled into. Defaults to self.main_branch_name.
+        :param title: Optional title for the PR. If None, uses the first line of the last commit message on the head_branch.
+        :param body: Optional body/description for the PR. If None, a default body is generated.
+        :param proposal_id: Optional proposal ID for logging and inclusion in PR body.
+        :return: URL of the created PR, or None if creation failed.
         """
-        # This requires GitHub API interaction (e.g., using PyGithub or `gh` CLI)
-        # For now, this is a placeholder.
-        logger.info(f"Attempting to open PR for branch '{branch}' against '{base_branch}'.")
-        if not self.github_token:
-            logger.warning("GitHub token not provided. Cannot open PR via API.")
-            # Fallback: provide instructions for manual PR or using gh CLI
-            try:
-                # Check if gh CLI is installed
-                subprocess.run(["gh", "--version"], check=True, capture_output=True)
+        _base_branch = base_branch or self.main_branch_name
+        logger.info(f"Attempting to open PR for branch '{head_branch}' against '{_base_branch}'.")
 
-                pr_title = title
-                if not pr_title:
-                    # Get last commit message for title
-                    commit_msg, _, ret_code = self._run_git_command(["log", "-1", "--pretty=%B", branch])
-                    if ret_code == 0 and commit_msg:
-                        pr_title = commit_msg.splitlines()[0] # Use first line of commit message
+        if not self._gh_client:
+            logger.warning("GitHubClient not initialized. Cannot open PR via API. Please configure GITHUB_TOKEN and GITHUB_REPOSITORY.")
+            # Try falling back to gh CLI if available
+            return self._open_pr_with_cli(head_branch, title, body, _base_branch)
+
+        try:
+            pr_title = title
+            if not pr_title:
+                # Try to get the last commit message from the local repo first for the head_branch
+                # This assumes head_branch is currently checked out or accessible locally
+                # If this SelfModifier instance just created and pushed head_branch, it might not be locally available
+                # unless we checkout to it. A safer bet is to use GitHubClient to get commits from remote.
+                commit_messages = self._gh_client.get_commit_messages(branch_name=head_branch, limit=1)
+                if commit_messages:
+                    pr_title = commit_messages[0].splitlines()[0]
+                else: # Fallback if no commit messages found via API (e.g., branch not pushed yet, unlikely here)
+                    commit_msg_stdout, _, ret_code = self._run_git_command(["log", "-1", "--pretty=%B", head_branch], raise_on_error=False)
+                    if ret_code == 0 and commit_msg_stdout.strip():
+                        pr_title = commit_msg_stdout.strip().splitlines()[0]
                     else:
-                        pr_title = f"Proposed changes from branch {branch}"
+                        pr_title = f"Proposed changes from branch {head_branch}"
+                logger.info(f"Using PR Title: '{pr_title}'")
 
-                pr_body = body if body else f"Automated PR for changes in branch {branch}."
+            pr_body = body
+            if not pr_body:
+                pr_body = f"Automated PR for changes in branch `{head_branch}`."
+                if proposal_id:
+                    pr_body += f"\nProposal ID: {proposal_id}"
+                # Potentially add more details from recent commits if desired
+                # recent_commits = self._gh_client.get_commit_messages(branch_name=head_branch, limit=3)
+                # if recent_commits:
+                #     pr_body += "\n\nRecent commits:\n" + "\n".join([f"- {msg.splitlines()[0]}" for msg in recent_commits])
 
-                # Use gh CLI to open PR
-                # Ensure you are logged in with `gh auth login` if using this.
-                pr_command = ["gh", "pr", "create", "--base", base_branch, "--head", branch, "--title", pr_title, "--body", pr_body]
+            pr_url = self._gh_client.create_pull_request(
+                title=pr_title,
+                body=pr_body,
+                head_branch=head_branch,
+                base_branch=_base_branch
+            )
 
-                logger.info(f"Using 'gh' CLI to create PR: {' '.join(pr_command)}")
-                # This command will run in the context of the repo_path.
-                # It might require user interaction if not fully authenticated or if there are conflicts.
-                # For a fully automated system, direct API calls (PyGithub) are better.
-                process = subprocess.run(pr_command, cwd=self.repo_path, capture_output=True, text=True, check=False)
+            if pr_url:
+                # Log for MemoryManager / proposal log (simulated)
+                logger.info(f"PR_SUCCESS: Proposal ID '{proposal_id if proposal_id else 'N/A'}', Branch: '{head_branch}', PR URL: {pr_url}")
+            else:
+                logger.error(f"PR_FAILURE: Proposal ID '{proposal_id if proposal_id else 'N/A'}', Branch: '{head_branch}'. Failed to create PR using API.")
+            return pr_url
 
-                if process.returncode == 0:
-                    pr_url = process.stdout.strip() # gh pr create usually outputs the URL
-                    logger.info(f"PR created successfully: {pr_url}")
-                    return pr_url
-                else:
-                    logger.error(f"'gh pr create' failed: {process.stderr}")
-                    return f"Error opening PR using 'gh' CLI: {process.stderr}. Please open manually."
+        except Exception as e:
+            logger.error(f"An unexpected error occurred in create_pull_request: {e}", exc_info=True)
+            return None
 
-            except (FileNotFoundError, subprocess.CalledProcessError):
-                logger.warning("'gh' CLI not found or not configured. Please open PR manually.")
-                return f"GitHub token not available and 'gh' CLI failed. Please open PR manually for branch '{branch}' against '{base_branch}'."
+    def _open_pr_with_cli(self, branch: str, title: Optional[str], body: Optional[str], base_branch: str) -> Optional[str]:
+        """Fallback to open PR using GitHub CLI."""
+        logger.info(f"Attempting to open PR for branch '{branch}' against '{base_branch}' using 'gh' CLI.")
+        try:
+            subprocess.run(["gh", "--version"], check=True, capture_output=True, text=True) # Check for gh
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            logger.warning("'gh' CLI not found or not configured. Cannot open PR.")
+            return f"GitHubClient not available and 'gh' CLI failed. Please open PR manually for branch '{branch}' against '{base_branch}'."
 
-        # TODO: Implement GitHub API call using self.github_token
-        return f"Error: PR opening via API not yet implemented. Please open PR for branch '{branch}' manually."
+        pr_title = title
+        if not pr_title:
+            commit_msg, _, ret_code = self._run_git_command(["log", "-1", "--pretty=%B", branch], raise_on_error=False)
+            if ret_code == 0 and commit_msg:
+                pr_title = commit_msg.splitlines()[0]
+            else:
+                pr_title = f"Proposed changes from branch {branch}"
+
+        pr_body = body if body else f"Automated PR for changes in branch {branch} (via gh CLI)."
+        pr_command = ["gh", "pr", "create", "--base", base_branch, "--head", branch, "--title", pr_title, "--body", pr_body]
+        logger.info(f"Executing 'gh' CLI command: {' '.join(pr_command)}")
+
+        try:
+            process = subprocess.run(pr_command, cwd=self.repo_path, capture_output=True, text=True, check=True)
+            pr_url = process.stdout.strip()
+            logger.info(f"PR created successfully using 'gh' CLI: {pr_url}")
+            # Log for MemoryManager / proposal log (simulated)
+            logger.info(f"PR_SUCCESS_CLI: Branch: '{branch}', PR URL: {pr_url}")
+            return pr_url
+        except subprocess.CalledProcessError as e:
+            logger.error(f"'gh pr create' failed: {e.stderr}")
+            logger.info(f"PR_FAILURE_CLI: Branch: '{branch}'. Failed to create PR using gh CLI: {e.stderr}")
+            return f"Error opening PR using 'gh' CLI: {e.stderr}. Please open manually."
+        except Exception as e:
+            logger.error(f"Unexpected error using 'gh pr create': {e}", exc_info=True)
+            return f"Unexpected error opening PR using 'gh' CLI. Please open manually."
+
 
     # Updated method signature and logic
     def sandbox_test(self, repo_clone_path: str, proposal_id: str) -> tuple[bool, str]:
@@ -358,32 +424,42 @@ class SelfModifier:
         """
         # This requires GitHub API interaction.
         logger.info(f"Attempting to merge PR '{pr_id}' using method '{merge_method}'.")
-        if not self.github_token:
-            logger.warning("GitHub token not provided. Cannot merge PR via API.")
-            # Fallback: provide instructions for manual merge or using gh CLI
-            try:
-                # Use gh CLI to merge PR
-                # gh pr merge <pr-number-or-url> --merge | --rebase | --squash
-                merge_flag = f"--{merge_method}"
-                pr_merge_command = ["gh", "pr", "merge", pr_id, merge_flag, "--delete-branch"] # Also delete branch after merge
 
+        if not self._gh_client:
+            logger.warning("GitHubClient not initialized. Cannot merge PR via API. Falling back to CLI if available.")
+            # Fallback to CLI
+            try:
+                subprocess.run(["gh", "--version"], check=True, capture_output=True, text=True)
+                merge_flag = f"--{merge_method}"
+                # Ensure pr_id is just the number if it's a URL for gh cli
+                pr_identifier = pr_id.split('/')[-1] if pr_id.startswith("http") else pr_id
+
+                pr_merge_command = ["gh", "pr", "merge", pr_identifier, merge_flag, "--delete-branch"]
                 logger.info(f"Using 'gh' CLI to merge PR: {' '.join(pr_merge_command)}")
                 process = subprocess.run(pr_merge_command, cwd=self.repo_path, capture_output=True, text=True, check=False)
-
                 if process.returncode == 0:
-                    logger.info(f"PR '{pr_id}' merged successfully using 'gh' CLI.")
+                    logger.info(f"PR '{pr_identifier}' merged successfully using 'gh' CLI.")
                     return True
                 else:
-                    logger.error(f"'gh pr merge' failed: {process.stderr}")
+                    logger.error(f"'gh pr merge' failed for PR '{pr_identifier}': {process.stderr}")
                     return False
-
             except (FileNotFoundError, subprocess.CalledProcessError) as e:
                 logger.warning(f"'gh' CLI not found or failed during merge: {e}. Please merge PR manually.")
                 return False
+            except Exception as e:
+                logger.error(f"Unexpected error during 'gh pr merge': {e}", exc_info=True)
+                return False
 
-        # TODO: Implement GitHub API call using self.github_token
-        logger.error("PR merging via API not yet implemented.")
-        return False
+        # If GitHubClient is available, use it (not yet implemented in GitHubClient)
+        # For now, this part remains conceptual for PyGithub based merge
+        logger.error("PR merging via PyGithub API not yet implemented in GitHubClient. Only CLI fallback is attempted.")
+        # Example of what it might look like if GitHubClient had merge_pr:
+        # try:
+        #     return self._gh_client.merge_pr(pr_id, merge_method)
+        # except Exception as e:
+        #     logger.error(f"Error merging PR '{pr_id}' using API: {e}")
+        #     return False
+        return False # Default to false as API merge is not implemented
 
     def reload_code(self) -> None:
         """
@@ -455,9 +531,14 @@ if __name__ == '__main__':
 
 
     # Initialize SelfModifier - assumes current directory is the git repo.
-    # For GitHub operations, you'd typically load GITHUB_TOKEN from .env
-    # modifier = SelfModifier(github_token=os.getenv("GITHUB_TOKEN"), sandbox_manager=MockSandbox())
-    modifier = SelfModifier(sandbox_manager=MockSandbox()) # No GitHub token for local demo
+    # For GitHub operations, ensure GITHUB_TOKEN, GITHUB_REPOSITORY, and MAIN_BRANCH_NAME (optional, defaults to 'main')
+    # environment variables are set if not passing them directly.
+    modifier = SelfModifier(
+        sandbox_manager=MockSandbox(),
+        # github_token=os.getenv("GITHUB_TOKEN"), # Handled by GitHubClient if None
+        # github_repo_name=os.getenv("GITHUB_REPOSITORY"), # Handled by GitHubClient if None
+        # main_branch_name=os.getenv("MAIN_BRANCH_NAME") # Handled by SelfModifier constructor
+    )
 
     # 1. Propose a change
     # Create a dummy file to change
@@ -476,65 +557,107 @@ if __name__ == '__main__':
     commit_message = "Test: SelfModifier proposes a change to dummy file"
     # Ensure a unique branch name to avoid conflicts if run multiple times
     test_branch_name = f"test-self-modifier-proposal-{os.urandom(2).hex()}"
+    proposal_uuid = f"proposal_{os.urandom(4).hex()}" # Example proposal ID
 
-    print(f"\n--- Proposing Change on branch {test_branch_name} ---")
-    branch_result = modifier.propose_change(file_changes, commit_message, branch_name=test_branch_name)
-    print(f"Propose change result: {branch_result}")
+    print(f"\n--- Proposing Code Changes on branch {test_branch_name} (Proposal ID: {proposal_uuid}) ---")
+    try:
+        # propose_code_changes now returns (branch_name, original_base_branch)
+        created_branch, original_base_branch = modifier.propose_code_changes(
+            files_content=file_changes,
+            commit_message=commit_message,
+            branch_name=test_branch_name,
+            proposal_id=proposal_uuid
+        )
+        print(f"Code changes proposed successfully on local branch: {created_branch} (based off {original_base_branch}), and pushed to remote.")
 
-    if "Error" not in branch_result:
-        created_branch = branch_result # propose_change returns branch name on success
+        # 2. Open a PR using the new method
+        print(f"\n--- Creating Pull Request for branch {created_branch} (Proposal ID: {proposal_uuid}) ---")
+        # Base branch for PR can be specified, or it defaults to self.main_branch_name (e.g. 'main')
+        # which was determined from current branch when propose_code_changes was called if not specified
+        pr_title = f"Automated Test PR for {created_branch} ({proposal_uuid})"
+        pr_body = f"This is an automated test pull request for proposal {proposal_uuid}.\nChanges are in branch `{created_branch}`."
 
-        # 2. Open a PR (will likely use gh CLI or show manual instructions)
-        print(f"\n--- Opening PR for branch {created_branch} ---")
-        pr_result = modifier.open_pr(created_branch, title=f"Automated Test PR for {created_branch}", base_branch="main") # Assuming 'main' is your default branch
-        print(f"Open PR result: {pr_result}")
-        # pr_id_for_merge would be extracted from pr_result if successful (e.g., the PR number or URL)
+        # base_branch_for_pr = original_base_branch # This is the branch it was created from
+        # Or use the configured main branch:
+        base_branch_for_pr = modifier.main_branch_name
+
+        pr_url = modifier.create_pull_request(
+            head_branch=created_branch,
+            base_branch=base_branch_for_pr, # Explicitly use the determined original base or configured main
+            title=pr_title,
+            body=pr_body,
+            proposal_id=proposal_uuid
+        )
+        print(f"Create Pull Request result: {pr_url}")
 
         # 3. Test the branch in a sandbox
-        print(f"\n--- Sandbox Testing branch {created_branch} ---")
-        test_passed = modifier.sandbox_test(created_branch)
-        print(f"Sandbox test passed: {test_passed}")
+        # For sandbox testing, SelfModifier's sandbox_test expects a path to a clone where the branch is checked out.
+        # The current SelfModifier is operating on the main repo_path.
+        # If tests need to run on the *committed and pushed* state, this is fine.
+        # The example `sandbox_test` takes `created_branch` which is not a path.
+        # This part of the example needs clarification on how `sandbox_test` is supposed to get the code.
+        # Assuming for now that `sandbox_test` can work with the current `repo_path`
+        # after checking out `created_branch`.
+        print(f"\n--- Sandbox Testing branch {created_branch} (Proposal ID: {proposal_uuid}) ---")
+        # Before testing, ensure the created_branch is checked out in the repo_path
+        # modifier.checkout_branch(created_branch) # This might be needed if sandbox_test doesn't handle it
+        # The current sandbox_test in SelfModifier seems to take repo_clone_path and proposal_id.
+        # It doesn't do the checkout itself.
+        # For this example, let's assume the current repo_path *is* the clone path and the branch is active.
+        # This part of the original example was: test_passed = modifier.sandbox_test(created_branch)
+        # which is incorrect as sandbox_test expects a path.
+        # We'll simulate it by just logging for now as the sandbox_test might need rework or a proper clone.
+
+        # To properly use sandbox_test, one would typically:
+        # 1. Clone the repo to a temporary location.
+        # 2. Checkout the specific `created_branch` in that clone.
+        # 3. Pass the path to this temporary clone to `sandbox_test`.
+        # This is skipped in this CLI example for brevity, as `sandbox_manager.run_validation_in_docker`
+        # expects a path where Dockerfile and code exist.
+
+        print(f"SKIPPING actual sandbox_test for branch {created_branch} in this CLI example.")
+        print("  (To run, SelfModifier's sandbox_test would need a proper clone path with the branch checked out)")
+        test_passed = True # Assume pass for example flow
 
         if test_passed:
-            # 4. Merge the PR (will likely use gh CLI or show manual instructions)
-            # This step is highly interactive or needs robust API setup.
-            # For this example, we'll assume pr_result contains a valid PR identifier if gh CLI worked.
-            if "Error" not in pr_result and pr_result.startswith("http"): # A URL implies success from gh create
-                pr_identifier_for_merge = pr_result
-                print(f"\n--- Merging PR {pr_identifier_for_merge} ---")
-                # merge_result = modifier.merge_pr(pr_identifier_for_merge) # This will try to merge and delete branch
-                # print(f"Merge PR result: {merge_result}")
-                # if merge_result:
-                #     print("PR merged successfully.")
-                #     # 5. Reload code (placeholder)
+            if pr_url and "Error" not in pr_url and pr_url.startswith("http"):
+                print(f"\n--- Merging PR {pr_url} (Conceptual) ---")
+                # The merge_pr in SelfModifier currently only has CLI fallback and no API impl.
+                # merge_successful = modifier.merge_pr(pr_id=pr_url, merge_method="squash") # Example
+                # print(f"Merge PR result: {merge_successful}")
+                # if merge_successful:
+                #     print("PR merged successfully (conceptually).")
                 #     modifier.reload_code()
                 # else:
-                #     print("PR merge failed or was skipped.")
-                print(f"SKIPPING MERGE for PR {pr_identifier_for_merge} in this example to avoid auto-merging test branches.")
-                print("If this were real, merge_pr would be called.")
-
+                # print("PR merge failed or was skipped (conceptual).")
+                print(f"SKIPPING MERGE for PR {pr_url} in this example as API merge is not fully implemented in SelfModifier/GitHubClient.")
             else:
-                print(f"Skipping merge because PR creation might have failed or was manual: {pr_result}")
+                print(f"Skipping merge because PR creation might have failed or was manual: {pr_url}")
         else:
-            print(f"Skipping merge because sandbox tests failed for branch {created_branch}.")
+            print(f"Skipping merge because sandbox tests failed (conceptually) for branch {created_branch}.")
 
-        # Clean up: delete the local and remote test branch if it wasn't merged and deleted
-        # This is for tidiness after the example run.
-        # In a real scenario, failed branches might be kept for inspection.
-        print(f"\n--- Cleaning up test branch {created_branch} ---")
-        modifier._run_git_command(["checkout", "main"], raise_on_error=False) # Switch to main first
+        # Clean up: delete the local test branch
+        # Remote branch deletion would typically happen if PR is merged and "delete branch on merge" is set,
+        # or could be done explicitly via API/CLI if PR is closed without merging.
+        print(f"\n--- Cleaning up local test branch {created_branch} ---")
+        current_checkout, _, _ = modifier._run_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
+        if current_checkout.strip() == created_branch: # If current branch is the one to delete
+             modifier.checkout_branch(base_branch_for_pr) # Switch to base branch first
+
         modifier._run_git_command(["branch", "-D", created_branch], raise_on_error=False)
         print(f"Deleted local branch: {created_branch}")
-        # Deleting remote branch (if it was pushed and not merged/deleted by PR)
-        # This command might fail if the branch was already deleted (e.g. by gh pr merge --delete-branch)
-        # or if it was never pushed successfully.
-        # modifier._run_git_command(["push", "origin", "--delete", created_branch], raise_on_error=False)
-        # print(f"Attempted to delete remote branch: {created_branch}")
-        print(f"SKIPPING remote branch deletion for branch: {created_branch} in this example.")
+        print(f"SKIPPING remote branch deletion for branch: {created_branch} in this example (usually handled by PR merge).")
+
+    except Exception as e:
+        logger.error(f"Error during SelfModifier example operation: {e}", exc_info=True)
+        print(f"An error occurred: {e}")
 
 
     # Clean up the dummy file
     if os.path.exists(dummy_file_path):
+        # Need to ensure we are on a branch that can commit, or handle if on detached HEAD
+        current_main_branch = modifier.main_branch_name
+        modifier.checkout_branch(current_main_branch)
         os.remove(dummy_file_path)
         modifier._run_git_command(["add", dummy_file_path], raise_on_error=False) # To stage the deletion
         modifier._run_git_command(["commit", "-m", "Clean up dummy_change_file.txt from self_modifier test"], raise_on_error=False)
