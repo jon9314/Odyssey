@@ -51,11 +51,15 @@ class TestSelfModificationTasks(unittest.TestCase):
         mock_settings_instance = mock_app_settings_cls.return_value
         mock_settings_instance.memory_db_path = "dummy_db.sqlite"
         mock_settings_instance.repo_path = mock_repo_path
-        # Provide mock values for new AppSettings related to Sandbox
-        mock_settings_instance.SANDBOX_HEALTH_CHECK_ENDPOINT = "/testhealth"
-        mock_settings_instance.SANDBOX_APP_PORT_IN_CONTAINER = 9000
-        mock_settings_instance.SANDBOX_HOST_PORT_FOR_HEALTH_CHECK = 19999
-        mock_settings_instance.SANDBOX_DEFAULT_TEST_COMMAND = "pytest --ci"
+        # Provide mock values for AppSettings related to Sandbox
+        mock_settings_instance.SANDBOX_HEALTH_CHECK_ENDPOINT = "/task_health"
+        mock_settings_instance.SANDBOX_APP_PORT_IN_CONTAINER = 9001
+        mock_settings_instance.SANDBOX_HOST_PORT_FOR_HEALTH_CHECK = 20000
+        mock_settings_instance.SANDBOX_DEFAULT_TEST_COMMAND = "task_pytest --slow"
+        mock_settings_instance.SANDBOX_DOCKER_MEMORY_LIMIT = "256m"
+        mock_settings_instance.SANDBOX_DOCKER_CPU_LIMIT = "0.25"
+        mock_settings_instance.SANDBOX_DOCKER_NETWORK = "host"
+        mock_settings_instance.SANDBOX_DOCKER_NO_NEW_PRIVILEGES = False
 
 
         mock_mm_instance = mock_memory_manager_cls.return_value
@@ -106,10 +110,14 @@ class TestSelfModificationTasks(unittest.TestCase):
 
         # Assert Sandbox was instantiated with values from AppSettings
         mock_sandbox_cls.assert_called_once_with(
-            health_check_endpoint="/testhealth",
-            app_port_in_container=9000,
-            host_port_for_health_check=19999,
-            test_command=["pytest", "--ci"]
+            health_check_endpoint="/task_health",
+            app_port_in_container=9001,
+            host_port_for_health_check=20000,
+            test_command=["task_pytest", "--slow"], # From shlex.split(mock_settings_instance.SANDBOX_DEFAULT_TEST_COMMAND)
+            docker_memory_limit="256m",
+            docker_cpu_limit="0.25",
+            docker_network="host",
+            docker_no_new_privileges=False
         )
 
         # Check SelfModifier instantiation for the local clone

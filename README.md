@@ -39,7 +39,7 @@ The self-modification workflow consists of the following stages:
 
 2.  **Validate Change:**
     *   Upon successful proposal submission, an asynchronous background task (`run_sandbox_validation_task`) is automatically triggered.
-    *   This task performs the following in an isolated environment (ideally using Docker):
+    *   This task performs the following in an isolated environment (ideally using Docker, with security features like read-only filesystems and resource limits applied, which are configurable via advanced settings):
         *   Clones the repository to a temporary, isolated location.
         *   Checks out the specific proposal branch.
         *   **Build & Startup (if applicable):** If the project involves a build step or runs as a service (e.g., defined by a `Dockerfile`), it attempts to build and start it.

@@ -24,20 +24,32 @@ DEFAULT_HEALTH_CHECK_ENDPOINT = "/health"
 DEFAULT_APP_PORT_IN_CONTAINER = 8000 # Assuming the app inside Docker exposes on this
 DEFAULT_HOST_PORT_FOR_HEALTH_CHECK = 18765 # Arbitrary host port for temporary mapping
 DEFAULT_TEST_COMMAND = ["python", "-m", "unittest", "discover", "-s", "./tests"] # Example
+DEFAULT_DOCKER_MEMORY_LIMIT = "1g"
+DEFAULT_DOCKER_CPU_LIMIT = None # No limit by default
+DEFAULT_DOCKER_NETWORK = "bridge"
+DEFAULT_DOCKER_NO_NEW_PRIVILEGES = True
+
 
 class Sandbox:
     def __init__(self,
                  health_check_endpoint: str = DEFAULT_HEALTH_CHECK_ENDPOINT,
                  app_port_in_container: int = DEFAULT_APP_PORT_IN_CONTAINER,
                  host_port_for_health_check: int = DEFAULT_HOST_PORT_FOR_HEALTH_CHECK,
-                 test_command: list[str] = None
+                 test_command: list[str] = None,
+                 docker_memory_limit: str = DEFAULT_DOCKER_MEMORY_LIMIT,
+                 docker_cpu_limit: Optional[str] = DEFAULT_DOCKER_CPU_LIMIT,
+                 docker_network: str = DEFAULT_DOCKER_NETWORK,
+                 docker_no_new_privileges: bool = DEFAULT_DOCKER_NO_NEW_PRIVILEGES
                  ):
         logger.info("Sandbox initialized.")
         self.health_check_endpoint = health_check_endpoint
         self.app_port_in_container = app_port_in_container
         self.host_port_for_health_check = host_port_for_health_check
         self.test_command = test_command if test_command is not None else DEFAULT_TEST_COMMAND.copy()
-
+        self.docker_memory_limit = docker_memory_limit
+        self.docker_cpu_limit = docker_cpu_limit
+        self.docker_network = docker_network
+        self.docker_no_new_privileges = docker_no_new_privileges
 
     def _run_docker_command(self, command: list, cwd: str = None, timeout: int = 300) -> tuple[bool, str, str]:
         """
@@ -112,10 +124,34 @@ class Sandbox:
             log_and_append(f"STEP 2: Running Docker container: {container_name} from image: {image_name}", "info")
             # Map the app port to a host port for health check
             docker_run_cmd = [
-                "docker", "run", "--name", container_name, "-d",
-                "-p", f"{self.host_port_for_health_check}:{self.app_port_in_container}",
-                image_name
+                "docker", "run",
+                "--name", container_name,
+                "-d", # Detached mode
+                "--read-only", # Make root filesystem read-only
+                "--cap-drop=ALL", # Drop all capabilities
+                # Consider adding back specific capabilities if absolutely needed by the app for tests, e.g. --cap-add=NET_BIND_SERVICE
+                "--memory", self.docker_memory_limit,
             ]
+            if self.docker_cpu_limit:
+                docker_run_cmd.extend(["--cpus", self.docker_cpu_limit])
+            if self.docker_no_new_privileges:
+                docker_run_cmd.append("--security-opt=no-new-privileges")
+
+            # Network configuration
+            # If network is 'none', port mapping and localhost health checks won't work.
+            # Health checks would need to be internal or via `docker logs`.
+            # For now, assume 'bridge' (default) allows localhost health check via mapped port.
+            if self.docker_network != "bridge": # Default is bridge, only add if different
+                docker_run_cmd.extend(["--network", self.docker_network])
+
+            # Only add port mapping if network is not 'none'.
+            # And if health check is required (which it is by current logic).
+            if self.docker_network != "none":
+                 docker_run_cmd.extend(["-p", f"{self.host_port_for_health_check}:{self.app_port_in_container}"])
+
+            docker_run_cmd.append(image_name) # Must be the last argument before options like entrypoint/cmd
+
+            log_and_append(f"Constructed docker run command: {' '.join(docker_run_cmd)}", "debug")
             run_success, stdout, stderr = self._run_docker_command(docker_run_cmd)
             log_and_append(f"Docker run STDOUT:\n{stdout}\nDocker run STDERR:\n{stderr}", "debug")
             if not run_success:

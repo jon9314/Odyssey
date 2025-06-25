@@ -79,6 +79,10 @@ class AppSettings(BaseSettings):
     SANDBOX_APP_PORT_IN_CONTAINER: int = 8000
     SANDBOX_HOST_PORT_FOR_HEALTH_CHECK: int = 18765 # Should be unique if multiple tests run in parallel
     SANDBOX_DEFAULT_TEST_COMMAND: str = "python -m unittest discover -s ./tests" # Store as string, parse in task
+    SANDBOX_DOCKER_MEMORY_LIMIT: str = "1g" # e.g., "512m", "1g"
+    SANDBOX_DOCKER_CPU_LIMIT: Optional[str] = None # e.g., "0.5", "1" (number of CPUs)
+    SANDBOX_DOCKER_NETWORK: str = "bridge" # Default Docker network. Use "none" for no network.
+    SANDBOX_DOCKER_NO_NEW_PRIVILEGES: bool = True
 
     # For .env file loading by Pydantic-Settings
     class Config:

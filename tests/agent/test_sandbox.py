@@ -15,12 +15,20 @@ class TestSandboxDockerValidation(unittest.TestCase):
         test_app_port = 8080
         test_host_port = 12345
         test_cmd_list = ["custom_test_runner", "--verbose"]
+        test_mem_limit = "512m"
+        test_cpu_limit = "0.5"
+        test_network = "none" # Test with a non-default network
+        test_no_new_priv = False # Test with a non-default
 
         sandbox = Sandbox(
             health_check_endpoint=test_health_endpoint,
             app_port_in_container=test_app_port,
             host_port_for_health_check=test_host_port,
-            test_command=test_cmd_list
+            test_command=test_cmd_list,
+            docker_memory_limit=test_mem_limit,
+            docker_cpu_limit=test_cpu_limit,
+            docker_network=test_network,
+            docker_no_new_privileges=test_no_new_priv
         )
         repo_clone_path = "/test/repo_clone"
         proposal_id = "prop_docker_001"
@@ -93,14 +101,37 @@ class TestSandboxDockerValidation(unittest.TestCase):
         for c_args, c_kwargs in mock_subprocess_run.call_args_list:
             cmd_list = c_args[0]
             if "docker" in cmd_list and "run" in cmd_list:
-                self.assertIn("-p", cmd_list)
-                self.assertIn(f"{test_host_port}:{test_app_port}", cmd_list)
+                if test_network == "none":
+                    self.assertNotIn("-p", cmd_list, "Port mapping should NOT be present if network is 'none'")
+                else:
+                    self.assertIn("-p", cmd_list)
+                    self.assertIn(f"{test_host_port}:{test_app_port}", cmd_list)
+                # Security and Resource options
+                self.assertIn("--read-only", cmd_list)
+                self.assertIn("--cap-drop=ALL", cmd_list)
+                self.assertIn("--memory", cmd_list)
+                self.assertIn(test_mem_limit, cmd_list)
+                self.assertIn("--cpus", cmd_list)
+                self.assertIn(test_cpu_limit, cmd_list)
+                # self.assertIn("--security-opt=no-new-privileges", cmd_list) # This was set to False for test
+                self.assertNotIn("--security-opt=no-new-privileges", cmd_list) # Check it's NOT there
+                self.assertIn("--network", cmd_list)
+                self.assertIn(test_network, cmd_list)
                 run_cmd_found = True
                 break
-        self.assertTrue(run_cmd_found, "Docker run command did not include expected port mapping.")
+        self.assertTrue(run_cmd_found, "Docker run command did not include expected options.")
 
-        # Check health check call
-        mock_requests_get.assert_called_once_with(f"http://localhost:{test_host_port}{test_health_endpoint}", timeout=3)
+        # Check health check call - it should NOT be called if network is 'none'
+        # as port mapping would not work for localhost access from host.
+        # The current Sandbox logic adds -p if network is not 'none'.
+        # If network IS 'none', health check via localhost:host_port is problematic.
+        # For this test, network is 'none', so port mapping is skipped by current Sandbox logic.
+        # Thus, requests.get should not be called.
+        if test_network == "none":
+            mock_requests_get.assert_not_called()
+            self.assertIn("Health check attempt failed", output_log) # Health check will fail as it can't connect
+        else: # If we were testing with bridge network
+            mock_requests_get.assert_called_once_with(f"http://localhost:{test_host_port}{test_health_endpoint}", timeout=3)
 
         # Check docker exec uses the configured test_command
         exec_cmd_found = False
