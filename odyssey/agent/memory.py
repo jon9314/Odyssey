@@ -102,7 +102,20 @@ class MemoryManager:
                     timestamp TEXT NOT NULL
                 )
             """)
-        logger.info("SQLite tables (tasks, plans, logs) checked/created.")
+            # Self Modification Log table
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS self_modification_log (
+                    proposal_id TEXT PRIMARY KEY,
+                    branch_name TEXT NOT NULL,
+                    commit_message TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    validation_output TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    approved_by TEXT
+                )
+            """)
+        logger.info("SQLite tables (tasks, plans, logs, self_modification_log) checked/created.")
 
     # --- Task Management Methods ---
     def add_task(self, description: str) -> Optional[int]:
@@ -234,6 +247,92 @@ class MemoryManager:
             return logs
         except sqlite3.Error as e:
             logger.error(f"SQLite error getting logs: {e}")
+            return []
+
+    # --- Self Modification Log Methods ---
+    def log_proposal_step(self, proposal_id: str, branch_name: str, commit_message: str,
+                          status: str, validation_output: Optional[str] = None,
+                          approved_by: Optional[str] = None) -> bool:
+        """
+        Logs or updates a step in the self-modification proposal lifecycle.
+        Uses UPSERT to handle new proposals or update existing ones.
+
+        :param proposal_id: Unique identifier for the proposal.
+        :param branch_name: Git branch name associated with the proposal.
+        :param commit_message: Commit message for the proposed change.
+        :param status: Current status of the proposal (e.g., "proposed", "validation_pending").
+        :param validation_output: Output from validation tests (nullable).
+        :param approved_by: Identifier of the user/entity that approved the proposal (nullable).
+        :return: True if the operation was successful, False otherwise.
+        """
+        now_timestamp = datetime.datetime.utcnow().isoformat()
+        try:
+            with self.conn:
+                self.conn.execute("""
+                    INSERT INTO self_modification_log (
+                        proposal_id, branch_name, commit_message, status,
+                        validation_output, created_at, updated_at, approved_by
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(proposal_id) DO UPDATE SET
+                        branch_name = excluded.branch_name,
+                        commit_message = excluded.commit_message,
+                        status = excluded.status,
+                        validation_output = excluded.validation_output,
+                        updated_at = excluded.updated_at,
+                        approved_by = excluded.approved_by
+                """, (proposal_id, branch_name, commit_message, status,
+                      validation_output, now_timestamp, now_timestamp, approved_by))
+            logger.info(f"Proposal step logged for ID '{proposal_id}'. Status: {status}, Updated_at: {now_timestamp}")
+            # Log to Langfuse (if integrated)
+            self.log_to_langfuse({
+                "event_type": "log_proposal_step", "proposal_id": proposal_id, "status": status,
+                "branch_name": branch_name, "commit_message": commit_message
+            })
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"SQLite error logging proposal step for ID '{proposal_id}': {e}")
+            return False
+
+    def get_proposal_log(self, proposal_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves the current log/status for a given proposal_id.
+
+        :param proposal_id: The unique identifier of the proposal to retrieve.
+        :return: A dictionary containing the proposal details if found, otherwise None.
+        """
+        try:
+            cursor = self.conn.execute(
+                "SELECT * FROM self_modification_log WHERE proposal_id = ?",
+                (proposal_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                logger.debug(f"Retrieved proposal log for ID '{proposal_id}'.")
+                return dict(row)
+            else:
+                logger.info(f"No proposal log found for ID '{proposal_id}'.")
+                return None
+        except sqlite3.Error as e:
+            logger.error(f"SQLite error retrieving proposal log for ID '{proposal_id}': {e}")
+            return None
+
+    def list_proposals(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Lists all self-modification proposals and their current status, ordered by the last update.
+
+        :param limit: Maximum number of proposals to return.
+        :return: A list of dictionaries, where each dictionary represents a proposal.
+        """
+        try:
+            cursor = self.conn.execute(
+                "SELECT * FROM self_modification_log ORDER BY updated_at DESC LIMIT ?",
+                (limit,)
+            )
+            proposals = [dict(row) for row in cursor.fetchall()]
+            logger.debug(f"Retrieved {len(proposals)} proposals.")
+            return proposals
+        except sqlite3.Error as e:
+            logger.error(f"SQLite error listing proposals: {e}")
             return []
 
     # --- Stubs for Future Features ---
