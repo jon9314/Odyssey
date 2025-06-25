@@ -568,4 +568,85 @@ You can interact with the semantic memory via the following API endpoints:
         http://localhost:8000/api/v1/memory/semantic/query | jq
         ```
 
+*   **`POST /api/v1/memory/hybrid/query`**
+    *   **Description:** Performs a hybrid query, fetching results from semantic search (vector store) based on `query_text` and optionally including structured data (tasks, DB logs, plans, self-modification proposals) based on `structured_options`.
+    *   **Request Body (`HybridQueryRequestSchema`):**
+        ```json
+        {
+          "query_text": "recent agent errors and related tasks",
+          "semantic_top_k": 3,
+          "semantic_metadata_filter": null, // Optional: e.g., {"type": "system_error"}
+          "structured_options": { // Optional: include this whole block to fetch structured data
+            "include_tasks": true,
+            "task_status_filter": "pending", // Optional
+            "task_limit": 2,
+            "include_db_logs": true,
+            "db_log_level_filter": "ERROR", // Optional
+            "db_log_limit": 2,
+            "include_plans": false,
+            "plan_limit": 1,
+            "include_proposals": true,
+            "proposal_limit": 1
+          }
+        }
+        ```
+    *   **Response (200 OK - `HybridQueryResponseSchema`):**
+        ```json
+        {
+          "query_text": "recent agent errors and related tasks",
+          "results": [
+            {
+              "source_type": "semantic_match",
+              "content": {
+                "id": "error_billing_001",
+                "text": "A critical error occurred in the billing module...",
+                "metadata": {"type": "system_error", "...": "..."},
+                "distance": 0.123
+              },
+              "relevance_score": 0.877, // Example: 1.0 - distance
+              "timestamp": "2023-11-15T10:00:00Z" // If available in metadata
+            },
+            {
+              "source_type": "task",
+              "content": {
+                "id": 105,
+                "description": "Fix critical bug #123 in the UI related to billing errors",
+                "status": "pending",
+                "timestamp": "2023-11-14T09:00:00Z"
+              },
+              "relevance_score": null, // Or some future keyword-based score
+              "timestamp": "2023-11-14T09:00:00Z"
+            },
+            {
+              "source_type": "db_log",
+              "content": {
+                "id": 210,
+                "message": "Billing module update failed: NullPointerException",
+                "level": "ERROR",
+                "timestamp": "2023-11-15T09:55:00Z"
+              },
+              "relevance_score": null,
+              "timestamp": "2023-11-15T09:55:00Z"
+            }
+            // ... other results, sorted by timestamp descending by default
+          ]
+        }
+        ```
+    *   **Curl Example:**
+        ```bash
+        curl -X POST -H "Content-Type: application/json" \
+        -d '{
+          "query_text": "issues with billing module",
+          "semantic_top_k": 2,
+          "structured_options": {
+            "include_db_logs": true,
+            "db_log_level_filter": "ERROR",
+            "db_log_limit": 3,
+            "include_tasks": true,
+            "task_limit": 2
+          }
+        }' \
+        http://localhost:8000/api/v1/memory/hybrid/query | jq
+        ```
+
 *(For error responses, such as when the vector store is unavailable (503) or for bad requests (400), the API will return a JSON object like `{"error": "Error message", "detail": "Optional further details"}`.)*

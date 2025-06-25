@@ -318,3 +318,148 @@ class TestMemoryManagerSemanticMemory(unittest.TestCase):
 # If running this file directly, ensure both test classes are picked up.
 # This might require adjusting how unittest.main() is called or running tests via a test runner.
 # For now, if __name__ == '__main__': unittest.main() is called, it will run all TestCases in the file.
+
+class TestMemoryManagerHybridQuery(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if os.path.exists(TEST_DB_DIR):
+            shutil.rmtree(TEST_DB_DIR)
+        os.makedirs(TEST_DB_DIR, exist_ok=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        if os.path.exists(TEST_DB_DIR):
+            shutil.rmtree(TEST_DB_DIR)
+
+    def setUp(self):
+        # Patch ChromaVectorStore for MemoryManager's __init__
+        self.patcher = patch('odyssey.agent.memory.ChromaVectorStore', MagicMock())
+        self.MockChromaVS = self.patcher.start()
+
+        self.memory = MemoryManager(
+            db_path=os.path.join(TEST_DB_DIR, "hybrid_test_db.sqlite"),
+            vector_store_persist_path=os.path.join(TEST_DB_DIR, "hybrid_test_vs_chroma")
+        )
+        # Mock the individual data fetching methods that hybrid_query will call
+        self.memory.semantic_search = MagicMock(return_value=[])
+        self.memory.get_tasks = MagicMock(return_value=[])
+        self.memory.get_logs = MagicMock(return_value=[])
+        self.memory.get_plans = MagicMock(return_value=[])
+        self.memory.list_proposals = MagicMock(return_value=[])
+
+    def tearDown(self):
+        self.patcher.stop()
+        self.memory.close()
+
+    def test_hybrid_query_semantic_only(self):
+        query_text = "find relevant documents"
+        semantic_top_k = 2
+        mock_semantic_results = [
+            {"id": "sem1", "text": "Semantic result 1", "metadata": {"timestamp": "2023-01-01T10:00:00"}, "distance": 0.1},
+            {"id": "sem2", "text": "Semantic result 2", "metadata": {"timestamp": "2023-01-01T11:00:00"}, "distance": 0.2},
+        ]
+        self.memory.semantic_search.return_value = mock_semantic_results
+
+        response = self.memory.hybrid_query(query_text=query_text, semantic_top_k=semantic_top_k)
+
+        self.memory.semantic_search.assert_called_once_with(
+            query_text=query_text, top_k=semantic_top_k, metadata_filter=None
+        )
+        self.assertEqual(len(response["results"]), 2)
+        self.assertEqual(response["results"][0]["source_type"], "semantic_match")
+        self.assertAlmostEqual(response["results"][0]["relevance_score"], 0.9) # 1.0 - 0.1
+        self.assertEqual(response["results"][0]["content"]["id"], "sem1")
+        # Results should be sorted by timestamp (mock data has sem2 later, so it should be first if sort works)
+        # Oh, my mock data for semantic results has sem2 later, but distance is higher (less relevant).
+        # The current sort is by timestamp. Let's check that.
+        # sem2 (11:00) should come before sem1 (10:00)
+        self.assertEqual(response["results"][0]["content"]["id"], "sem2") # After sorting by timestamp desc
+
+    def test_hybrid_query_structured_only_tasks(self):
+        query_text = "" # No semantic query
+        structured_options = {
+            "include_tasks": True, "task_status_filter": "pending", "task_limit": 1
+        }
+        mock_tasks = [
+            {"id": 1, "description": "Pending task 1", "status": "pending", "timestamp": "2023-01-02T10:00:00"},
+        ]
+        self.memory.get_tasks.return_value = mock_tasks
+
+        response = self.memory.hybrid_query(
+            query_text=query_text, semantic_top_k=0, structured_options=structured_options
+        )
+
+        self.memory.get_tasks.assert_called_once_with(status_filter="pending", limit=1)
+        self.memory.semantic_search.assert_not_called() # Or called with top_k=0
+        self.assertEqual(len(response["results"]), 1)
+        self.assertEqual(response["results"][0]["source_type"], "task")
+        self.assertEqual(response["results"][0]["content"]["id"], 1)
+
+    def test_hybrid_query_mixed_results_and_sorting(self):
+        query_text = "mixed query"
+        semantic_top_k = 1
+        structured_options = {"include_db_logs": True, "db_log_limit": 1}
+
+        # Semantic result is older
+        mock_semantic_results = [{"id": "sem_old", "text": "Old semantic", "metadata": {"timestamp": "2023-01-01T00:00:00"}, "distance": 0.3}]
+        # DB log is newer
+        mock_db_logs = [{"id": 10, "message": "Newer DB log", "level": "INFO", "timestamp": "2023-01-03T00:00:00"}]
+
+        self.memory.semantic_search.return_value = mock_semantic_results
+        self.memory.get_logs.return_value = mock_db_logs
+
+        response = self.memory.hybrid_query(
+            query_text=query_text, semantic_top_k=semantic_top_k, structured_options=structured_options
+        )
+
+        self.assertEqual(len(response["results"]), 2)
+        # Expect newer DB log first due to timestamp sorting
+        self.assertEqual(response["results"][0]["source_type"], "db_log")
+        self.assertEqual(response["results"][0]["content"]["id"], 10)
+        self.assertEqual(response["results"][1]["source_type"], "semantic_match")
+        self.assertEqual(response["results"][1]["content"]["id"], "sem_old")
+
+    def test_hybrid_query_no_options_or_query(self):
+        # Test with empty query text and no structured options, should return empty results
+        response = self.memory.hybrid_query(query_text="", semantic_top_k=0, structured_options={})
+        self.assertEqual(len(response["results"]), 0)
+        self.memory.semantic_search.assert_not_called() # Or called with top_k=0 -> which it is
+        self.memory.get_tasks.assert_not_called()
+        self.memory.get_logs.assert_not_called()
+
+    def test_hybrid_query_includes_all_types(self):
+        query_text = "everything"
+        options = {
+            "include_tasks": True, "task_limit": 1,
+            "include_db_logs": True, "db_log_limit": 1,
+            "include_plans": True, "plan_limit": 1,
+            "include_proposals": True, "proposal_limit": 1
+        }
+        self.memory.semantic_search.return_value = [{"id": "s1", "text": "s", "distance": 0.1, "metadata": {"timestamp": "2023-01-01T12:00:00"}}]
+        self.memory.get_tasks.return_value = [{"id": 1, "description": "t", "timestamp": "2023-01-01T11:00:00"}]
+        self.memory.get_logs.return_value = [{"id": 1, "message": "l", "timestamp": "2023-01-01T10:00:00"}]
+        self.memory.get_plans.return_value = [{"id": 1, "details": "p", "timestamp": "2023-01-01T09:00:00"}]
+        self.memory.list_proposals.return_value = [{"proposal_id": "prop1", "commit_message": "cm", "updated_at": "2023-01-01T08:00:00"}]
+
+        response = self.memory.hybrid_query(query_text, semantic_top_k=1, structured_options=options)
+
+        self.assertEqual(len(response["results"]), 5)
+        source_types = [r["source_type"] for r in response["results"]]
+        self.assertIn("semantic_match", source_types)
+        self.assertIn("task", source_types)
+        self.assertIn("db_log", source_types)
+        self.assertIn("plan", source_types)
+        self.assertIn("proposal", source_types)
+
+        # Check sorting (most recent first)
+        self.assertEqual(response["results"][0]["source_type"], "semantic_match") # 12:00
+        self.assertEqual(response["results"][1]["source_type"], "task") # 11:00
+        self.assertEqual(response["results"][2]["source_type"], "db_log") # 10:00
+        self.assertEqual(response["results"][3]["source_type"], "plan") # 09:00
+        self.assertEqual(response["results"][4]["source_type"], "proposal") # 08:00
+
+        self.memory.semantic_search.assert_called_once()
+        self.memory.get_tasks.assert_called_once()
+        self.memory.get_logs.assert_called_once()
+        self.memory.get_plans.assert_called_once()
+        self.memory.list_proposals.assert_called_once()

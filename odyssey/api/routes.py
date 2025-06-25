@@ -845,7 +845,7 @@ async def query_semantic_entries(
     try:
         results_from_mm = memory.semantic_search(
             query_text=request_data.query_text,
-            top_k=request_data.top_k or 5, # Ensure top_k has a default if not provided by Pydantic
+            top_k=request_data.top_k, # Relies on Pydantic default in SemanticQueryRequestSchema
             metadata_filter=request_data.metadata_filter
         )
 
@@ -877,6 +877,50 @@ async def query_semantic_entries(
 
 # The main router in main.py will need to include this memory_router
 # router.include_router(memory_router) # This should be done in main.py where `app` is defined.
+
+@memory_router.post(
+    "/hybrid/query",
+    response_model=HybridQueryResponseSchema,
+    responses={
+        200: {"model": HybridQueryResponseSchema, "description": "Hybrid query successful"},
+        400: {"model": SemanticErrorResponse, "description": "Invalid request (e.g., missing query_text)"},
+        # 503 could be used if a sub-system like vector store is down, but MemoryManager might handle that.
+        500: {"model": SemanticErrorResponse, "description": "Internal server error during hybrid query"},
+    }
+)
+async def hybrid_memory_query(
+    request_data: HybridQueryRequestSchema,
+    memory: MemoryManager = Depends(get_memory_manager)
+):
+    """
+    Performs a hybrid query, fetching results from semantic search (vector store)
+    and structured data sources (tasks, logs, plans, proposals) based on options.
+    The `query_text` is primarily used for semantic search.
+    """
+    logger.info(f"API: Received hybrid query. Query text snippet: '{request_data.query_text[:100]}...'")
+
+    try:
+        # Convert Pydantic model for structured_options to dict if it exists, else None
+        structured_options_dict = request_data.structured_options.model_dump() if request_data.structured_options else None
+
+        hybrid_results_data = memory.hybrid_query(
+            query_text=request_data.query_text,
+            semantic_top_k=request_data.semantic_top_k,
+            semantic_metadata_filter=request_data.metadata_filter,
+            structured_options=structured_options_dict
+        )
+
+        # The hybrid_query method in MemoryManager already returns a dict matching HybridQueryResponseSchema.
+        # So, we can directly pass it to the Pydantic model for validation and response.
+        logger.info(f"API: Hybrid query returned {len(hybrid_results_data.get('results', []))} combined results.")
+        return HybridQueryResponseSchema(**hybrid_results_data)
+
+    except Exception as e:
+        logger.error(f"API: Exception during hybrid query: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to perform hybrid query", "detail": str(e)}
+        )
 
 # --- End of File ---
 # async def read_items(skip: int = 0, limit: int = 10):

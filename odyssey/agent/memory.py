@@ -656,6 +656,108 @@ if __name__ == '__main__':
 
     # Optional: Clean up example files after run
     # if os.path.exists(example_db_path): os.remove(example_db_path)
-    # if os.path.exists(example_vector_path): shutil.rmtree(example_vector_path)
+    # if os.path.exists(example_vector_path): shutil.rmtree(example_vector_path) # Should be example_vector_persist_path
     # if os.path.exists(example_backup_path): shutil.rmtree(example_backup_path)
     # print("Cleaned up example files.")
+
+    def hybrid_query(self,
+                     query_text: str,
+                     semantic_top_k: int = 3,
+                     semantic_metadata_filter: Optional[Dict[str, Any]] = None,
+                     structured_options: Optional[Dict[str, Any]] = None
+                     ) -> Dict[str, Any]:
+        """
+        Performs a hybrid query, fetching results from both semantic search and structured data sources.
+
+        :param query_text: The primary query text, mainly for semantic search.
+        :param semantic_top_k: Number of results to fetch from semantic search.
+        :param semantic_metadata_filter: Metadata filter for semantic search.
+        :param structured_options: Dictionary of options for fetching structured data.
+            Expected keys (matching HybridQueryStructuredFilterOptionsSchema):
+            'include_tasks': bool, 'task_status_filter': Optional[str], 'task_limit': int,
+            'include_db_logs': bool, 'db_log_level_filter': Optional[str], 'db_log_limit': int,
+            'include_plans': bool, 'plan_limit': int,
+            'include_proposals': bool, 'proposal_limit': int
+        :return: A dictionary structured like HybridQueryResponseSchema.
+        """
+        all_results = []
+        structured_options = structured_options or {}
+
+        # 1. Semantic Search
+        if query_text and semantic_top_k > 0:
+            logger.info(f"Hybrid query: Performing semantic search for '{query_text[:100]}...' (top_k={semantic_top_k})")
+            semantic_hits = self.semantic_search(
+                query_text=query_text,
+                top_k=semantic_top_k,
+                metadata_filter=semantic_metadata_filter
+            )
+            for hit in semantic_hits:
+                if "error" in hit: # Skip error objects from semantic_search
+                    logger.warning(f"Hybrid query: Semantic search returned an error object: {hit}")
+                    continue
+                all_results.append({
+                    "source_type": "semantic_match",
+                    "content": hit, # The entire hit (id, text, metadata, distance) is content
+                    "relevance_score": 1.0 - hit.get("distance", 1.0) if hit.get("distance") is not None else 0.0, # Convert distance to score
+                    "timestamp": datetime.datetime.fromisoformat(hit.get("metadata", {}).get("timestamp")) if hit.get("metadata", {}).get("timestamp") else None
+                })
+
+        # 2. Structured Data Fetching
+        logger.info(f"Hybrid query: Processing structured options: {structured_options}")
+        if structured_options.get('include_tasks', False):
+            tasks = self.get_tasks(
+                status_filter=structured_options.get('task_status_filter'),
+                limit=structured_options.get('task_limit', 5)
+            )
+            for task in tasks:
+                all_results.append({
+                    "source_type": "task",
+                    "content": task,
+                    "relevance_score": None, # No direct relevance score from this source yet
+                    "timestamp": datetime.datetime.fromisoformat(task.get("timestamp")) if task.get("timestamp") else None
+                })
+
+        if structured_options.get('include_db_logs', False):
+            db_logs = self.get_logs(
+                level_filter=structured_options.get('db_log_level_filter'),
+                limit=structured_options.get('db_log_limit', 5)
+            )
+            for log_entry in db_logs:
+                all_results.append({
+                    "source_type": "db_log",
+                    "content": log_entry,
+                    "relevance_score": None,
+                    "timestamp": datetime.datetime.fromisoformat(log_entry.get("timestamp")) if log_entry.get("timestamp") else None
+                })
+
+        if structured_options.get('include_plans', False):
+            plans = self.get_plans(limit=structured_options.get('plan_limit', 5))
+            for plan in plans:
+                all_results.append({
+                    "source_type": "plan",
+                    "content": plan,
+                    "relevance_score": None,
+                    "timestamp": datetime.datetime.fromisoformat(plan.get("timestamp")) if plan.get("timestamp") else None
+                })
+
+        if structured_options.get('include_proposals', False):
+            proposals = self.list_proposals(limit=structured_options.get('proposal_limit', 5))
+            for proposal in proposals:
+                all_results.append({
+                    "source_type": "proposal", # self_modification_log
+                    "content": proposal,
+                    "relevance_score": None,
+                     # Use 'updated_at' as primary timestamp, fallback to 'created_at'
+                    "timestamp": datetime.datetime.fromisoformat(proposal.get("updated_at")) if proposal.get("updated_at") else (datetime.datetime.fromisoformat(proposal.get("created_at")) if proposal.get("created_at") else None)
+                })
+
+        # Simple concatenation for now. Future: sort by timestamp or relevance_score if normalized.
+        # Sort by timestamp descending (most recent first), if available
+        try:
+            all_results.sort(key=lambda x: x.get("timestamp") or datetime.datetime.min, reverse=True)
+        except TypeError as te:
+            logger.warning(f"Hybrid query: Could not sort results by timestamp due to type error (possibly None mixed with datetime without proper handling for all items): {te}")
+            # Proceed with unsorted or partially sorted results if timestamps are inconsistent
+
+        logger.info(f"Hybrid query: Returning {len(all_results)} combined results.")
+        return {"query_text": query_text, "results": all_results}
