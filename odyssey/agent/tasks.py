@@ -178,73 +178,175 @@ def execute_tool_task(self, tool_name: str, tool_args: Dict[str, Any]) -> Any:
                 logger.error(f"{log_prefix} Error closing MemoryManager: {e_close}", exc_info=True)
 
 
-@celery_app.task(bind=True, name="odyssey.agent.tasks.validate_proposal_task")
-def validate_proposal_task(self, proposal_id: str, branch_name: str) -> Dict[str, Any]:
+import tempfile
+import shutil
+import os
+
+@celery_app.task(bind=True, name="odyssey.agent.tasks.run_sandbox_validation_task")
+def run_sandbox_validation_task(self, proposal_id: str, branch_name: str) -> Dict[str, Any]:
     """
-    (STUB) Simulates validation of a code proposal.
-    In a real scenario, this would involve:
-    1. Checking out the specified branch.
-    2. Running linters, tests, and other quality checks.
-    3. Reporting results.
-    Updates the proposal status in MemoryManager.
+    Performs sandbox validation for a given proposal branch.
+    - Clones the repository to a temporary directory.
+    - Checks out the specified branch.
+    - Runs build steps and tests (simulated for now, with Docker as preferred method).
+    - Updates the proposal status in MemoryManager.
     """
     task_id = self.request.id
-    log_prefix = f"[CeleryTask:{task_id}:validate_proposal_task -> {proposal_id} ({branch_name})]"
+    log_prefix = f"[CeleryTask:{task_id}:run_sandbox_validation_task -> {proposal_id} ({branch_name})]"
     logger.info(f"{log_prefix} Started.")
 
-    # Dependency imports inside the task for worker context
     from odyssey.agent.main import AppSettings
     from odyssey.agent.memory import MemoryManager
-    # from odyssey.agent.self_modifier import SelfModifier # If needed for checkout
+    from odyssey.agent.self_modifier import SelfModifier
+    from odyssey.agent.sandbox import Sandbox
 
     settings: Optional[AppSettings] = None
     memory: Optional[MemoryManager] = None
-    # self_modifier_instance: Optional[SelfModifier] = None
+    temp_repo_dir: Optional[str] = None
+    original_commit_message: str = "N/A"
 
     try:
         settings = AppSettings()
         memory = MemoryManager(db_path=settings.memory_db_path)
-        # self_modifier_instance = SelfModifier(repo_path=settings.repo_path) # Assuming repo_path is in settings
 
-        logger.info(f"{log_prefix} Simulating proposal validation...")
+        # Fetch original commit message early
+        proposal_data = memory.get_proposal_log(proposal_id)
+        if proposal_data and proposal_data.get('commit_message'):
+            original_commit_message = proposal_data['commit_message']
+        else:
+            logger.warning(f"{log_prefix} Could not retrieve original commit message for proposal {proposal_id}.")
+
+
         memory.log_proposal_step(
             proposal_id=proposal_id, branch_name=branch_name, status="validation_in_progress",
-            commit_message=memory.get_proposal_log(proposal_id)['commit_message'] # Get existing commit message
+            commit_message=original_commit_message
         )
 
-        # Simulate validation work (e.g., running tests)
-        time.sleep(5) # Simulate some work
+        # 1. Create a temporary directory for the clone
+        temp_repo_dir = tempfile.mkdtemp(prefix=f"odyssey_validation_{proposal_id}_")
+        logger.info(f"{log_prefix} Created temporary directory for validation: {temp_repo_dir}")
 
-        # Simulate a validation outcome (e.g., randomly pass or fail for stub)
-        import random
-        validation_passed = random.choice([True, True, False]) # Higher chance of passing for testing flow
+        # 2. Initialize SelfModifier for the temporary directory (or use main repo path for clone source)
+        # We need the main repo path to clone from, and then operate within temp_repo_dir.
+        # SelfModifier needs to be able to clone settings.repo_path into temp_repo_dir.
+        # Let's assume SelfModifier's _run_git_command can take a `cwd` argument,
+        # or we use subprocess directly for clone.
+
+        # Cloning the main repository (settings.repo_path) into temp_repo_dir
+        # Using subprocess directly for more control over clone destination
+        clone_process = subprocess.run(
+            ["git", "clone", settings.repo_path, temp_repo_dir],
+            capture_output=True, text=True, check=False
+        )
+        if clone_process.returncode != 0:
+            error_msg = f"Failed to clone repository from '{settings.repo_path}' to '{temp_repo_dir}'. Error: {clone_process.stderr}"
+            logger.error(f"{log_prefix} {error_msg}")
+            raise Exception(error_msg)
+        logger.info(f"{log_prefix} Successfully cloned repository into {temp_repo_dir}")
+
+        # Now, SelfModifier operates on this temporary clone
+        # We can re-initialize a SelfModifier instance for this path, or add cwd to _run_git_command
+        # For simplicity, let's assume _run_git_command in SelfModifier can be adapted or we use it carefully.
+        # A simpler approach for this task: initialize a new SelfModifier for the temp path.
+        local_self_modifier = SelfModifier(repo_path=temp_repo_dir)
+
+        # 3. Fetch and checkout the specific proposal branch
+        logger.info(f"{log_prefix} Fetching and checking out branch '{branch_name}' in temporary clone.")
+        # Fetch the specific branch. This assumes 'origin' in the temp clone refers to the source repo.
+        # This might need adjustment if the clone source is local.
+        # A safer way is to fetch all and then checkout.
+        # _, _, ret_fetch = local_self_modifier._run_git_command(["fetch", "origin", branch_name], raise_on_error=False)
+        # if ret_fetch != 0:
+        #     logger.warning(f"{log_prefix} Could not fetch branch '{branch_name}'. May already be present or error. Stderr: {local_self_modifier._run_git_command(['fetch', 'origin', branch_name])[1]}")
+
+        if not local_self_modifier.checkout_branch(branch_name):
+            # If checkout fails, it might be because the branch is not fetched.
+            # Let's try a more robust fetch and checkout sequence.
+            logger.info(f"{log_prefix} Initial checkout failed. Attempting git pull origin {branch_name}.")
+            # This assumes the branch exists on the remote 'origin' of the temp clone's source.
+            # This will create a local branch tracking the remote one if it exists.
+            _, stderr_pull, ret_pull = local_self_modifier._run_git_command(["pull", "origin", branch_name], raise_on_error=False)
+            if ret_pull != 0:
+                 error_msg = f"Failed to checkout branch '{branch_name}' in temporary clone even after pull attempt. Error: {stderr_pull}"
+                 logger.error(f"{log_prefix} {error_msg}")
+                 raise Exception(error_msg)
+            logger.info(f"{log_prefix} Successfully checked out branch '{branch_name}' after pull.")
+
+
+        # 4. Run Build/Tests (Sandbox simulation)
+        logger.info(f"{log_prefix} Starting simulated build and test process for branch '{branch_name}'.")
+        sandbox = Sandbox() # Initialize sandbox for this task
+
         validation_output = ""
+        validation_status = "validation_failed" # Default to failed
 
-        if validation_passed:
-            validation_status = "validation_passed"
-            validation_output = "All checks passed. Code quality is good. Tests are green."
-            logger.info(f"{log_prefix} Validation simulation: PASSED. Output: {validation_output}")
+        # --- Docker-based validation (Preferred) ---
+        dockerfile_path = os.path.join(temp_repo_dir, "Dockerfile") # Standard Dockerfile location
+        # dockerfile_alt_path = os.path.join(temp_repo_dir, "docker", "Dockerfile") # Alternative
+
+        # For now, simulate test execution.
+        # In a real scenario, you'd check for dockerfile_path, build, and run tests.
+        # For this stub, we'll simulate:
+        time.sleep(10) # Simulate longer work: build, test execution
+
+        # Example: Simulate running a test script using Sandbox's test_code
+        # This would be a script *within the cloned repository*
+        test_script_in_repo = "scripts/run_tests.sh" # Example path within the repo
+        full_test_script_path = os.path.join(temp_repo_dir, test_script_in_repo)
+
+        if os.path.exists(full_test_script_path):
+            logger.info(f"{log_prefix} Found test script at '{test_script_in_repo}'. Executing...")
+            # This would need the script to be executable and set up correctly.
+            # For now, this is a placeholder for actual execution logic.
+            # We'd use subprocess.run directly here, setting cwd=temp_repo_dir
+            try:
+                test_run_process = subprocess.run(
+                    [full_test_script_path], # Or ['python', '-m', 'unittest', 'discover'] etc.
+                    cwd=temp_repo_dir,
+                    capture_output=True, text=True, check=False, timeout=300 # 5 min timeout
+                )
+                validation_output += f"Test Script STDOUT:\n{test_run_process.stdout}\n"
+                validation_output += f"Test Script STDERR:\n{test_run_process.stderr}\n"
+                if test_run_process.returncode == 0:
+                    validation_status = "validation_passed"
+                    logger.info(f"{log_prefix} Test script '{test_script_in_repo}' executed successfully.")
+                else:
+                    logger.warning(f"{log_prefix} Test script '{test_script_in_repo}' failed. Exit code: {test_run_process.returncode}")
+            except subprocess.TimeoutExpired:
+                error_msg = "Test script execution timed out."
+                logger.error(f"{log_prefix} {error_msg}")
+                validation_output += f"ERROR: {error_msg}\n"
+            except Exception as e_test:
+                error_msg = f"Error executing test script: {e_test}"
+                logger.error(f"{log_prefix} {error_msg}", exc_info=True)
+                validation_output += f"ERROR: {error_msg}\n"
         else:
-            validation_status = "validation_failed"
-            validation_output = "Validation failed: Linter errors found. Unit test 'test_critical_feature' failed."
-            logger.warning(f"{log_prefix} Validation simulation: FAILED. Output: {validation_output}")
+            logger.warning(f"{log_prefix} Test script '{test_script_in_repo}' not found. Simulating basic pass/fail.")
+            # Fallback to random simulation if no script
+            import random
+            if random.choice([True, True, False]):
+                validation_status = "validation_passed"
+                validation_output = "Simulated tests passed. (No test script found)"
+            else:
+                validation_output = "Simulated tests failed. (No test script found)"
 
+        logger.info(f"{log_prefix} Validation result: {validation_status}. Output: {validation_output[:500]}...")
+
+        # 5. Update MemoryManager
         memory.log_proposal_step(
-            proposal_id=proposal_id,
-            branch_name=branch_name,
-            commit_message=memory.get_proposal_log(proposal_id)['commit_message'], # Re-fetch in case it changed
-            status=validation_status,
-            validation_output=validation_output
+            proposal_id=proposal_id, branch_name=branch_name, status=validation_status,
+            commit_message=original_commit_message, validation_output=validation_output
         )
         return {"proposal_id": proposal_id, "status": validation_status, "output": validation_output}
 
     except Exception as e:
         logger.error(f"{log_prefix} Task critically failed. Error: {e}", exc_info=True)
-        if memory and proposal_id and branch_name: # Attempt to log failure if possible
+        if memory: # Attempt to log failure if possible
             try:
-                cm = memory.get_proposal_log(proposal_id)['commit_message']
-                memory.log_proposal_step(proposal_id=proposal_id, branch_name=branch_name, status="validation_error",
-                                         commit_message=cm, validation_output=f"Task error: {str(e)}")
+                memory.log_proposal_step(
+                    proposal_id=proposal_id, branch_name=branch_name, status="validation_error",
+                    commit_message=original_commit_message, validation_output=f"Task error: {str(e)}"
+                )
             except Exception as log_e:
                 logger.error(f"{log_prefix} Failed to log validation_error status to memory: {log_e}", exc_info=True)
         raise
@@ -252,89 +354,126 @@ def validate_proposal_task(self, proposal_id: str, branch_name: str) -> Dict[str
         if memory:
             memory.close()
             logger.debug(f"{log_prefix} MemoryManager closed.")
+        if temp_repo_dir and os.path.exists(temp_repo_dir):
+            try:
+                shutil.rmtree(temp_repo_dir)
+                logger.info(f"{log_prefix} Successfully removed temporary directory: {temp_repo_dir}")
+            except Exception as e_clean:
+                logger.error(f"{log_prefix} Failed to remove temporary directory '{temp_repo_dir}': {e_clean}", exc_info=True)
 
 
-@celery_app.task(bind=True, name="odyssey.agent.tasks.merge_proposal_task")
-def merge_proposal_task(self, proposal_id: str, branch_name: str) -> Dict[str, Any]:
+@celery_app.task(bind=True, name="odyssey.agent.tasks.merge_approved_proposal_task")
+def merge_approved_proposal_task(self, proposal_id: str) -> Dict[str, Any]: # Removed branch_name as it's in proposal log
     """
-    (STUB) Simulates merging an approved code proposal.
-    In a real scenario, this would involve:
-    1. Checking out the target branch (e.g., main/master).
-    2. Merging the feature branch (`branch_name`) into it.
-    3. Handling merge conflicts (or failing if not resolvable automatically).
-    4. Pushing the changes.
-    Updates the proposal status in MemoryManager.
+    Merges an approved code proposal into the main development branch.
+    - Fetches proposal details from MemoryManager.
+    - Uses SelfModifier to perform the merge operation.
+    - Updates the proposal status in MemoryManager.
     """
     task_id = self.request.id
-    log_prefix = f"[CeleryTask:{task_id}:merge_proposal_task -> {proposal_id} ({branch_name})]"
+    # Branch name will be fetched from proposal log
+    log_prefix = f"[CeleryTask:{task_id}:merge_approved_proposal_task -> {proposal_id}]"
     logger.info(f"{log_prefix} Started.")
 
     from odyssey.agent.main import AppSettings
     from odyssey.agent.memory import MemoryManager
-    # from odyssey.agent.self_modifier import SelfModifier
+    from odyssey.agent.self_modifier import SelfModifier
 
     settings: Optional[AppSettings] = None
     memory: Optional[MemoryManager] = None
-    # self_modifier_instance: Optional[SelfModifier] = None
+    self_modifier: Optional[SelfModifier] = None
+
+    # Fields to preserve from original proposal log
+    branch_name: Optional[str] = None
+    commit_message: str = "N/A"
+    approved_by: Optional[str] = None
+    validation_output_original: Optional[str] = None
+
 
     try:
         settings = AppSettings()
         memory = MemoryManager(db_path=settings.memory_db_path)
-        # self_modifier_instance = SelfModifier(repo_path=settings.repo_path)
+        self_modifier = SelfModifier(repo_path=settings.repo_path) # Operates on the main repo
 
-        original_proposal = memory.get_proposal_log(proposal_id)
-        if not original_proposal:
-            logger.error(f"{log_prefix} Proposal {proposal_id} not found in memory. Cannot proceed with merge.")
+        proposal_data = memory.get_proposal_log(proposal_id)
+        if not proposal_data:
+            logger.error(f"{log_prefix} Proposal {proposal_id} not found in memory. Cannot proceed.")
+            # This task shouldn't be called if proposal doesn't exist, but good to check.
             raise ValueError(f"Proposal {proposal_id} not found for merge.")
 
-        current_commit_message = original_proposal['commit_message']
-        current_approved_by = original_proposal.get('approved_by')
+        branch_name = proposal_data['branch_name']
+        commit_message = proposal_data['commit_message']
+        approved_by = proposal_data.get('approved_by')
+        validation_output_original = proposal_data.get('validation_output')
+
+        log_prefix = f"[CeleryTask:{task_id}:merge_approved_proposal_task -> {proposal_id} ({branch_name})]" # Update log_prefix with branch_name
+
+        if proposal_data['status'] not in ["user_approved", "merge_pending"]: # merge_pending if retrying
+            logger.warning(f"{log_prefix} Proposal status is '{proposal_data['status']}', not 'user_approved' or 'merge_pending'. Merge will not proceed.")
+            # Update status to reflect this, perhaps "merge_skipped_status" or just log and return.
+            # For now, we'll let it try to proceed but SelfModifier might also have checks.
+            # Better to fail early if status is not right.
+            raise Exception(f"Proposal status is '{proposal_data['status']}'. Merge requires 'user_approved' or 'merge_pending'.")
 
 
-        logger.info(f"{log_prefix} Simulating proposal merge...")
+        logger.info(f"{log_prefix} Attempting to merge branch '{branch_name}'.")
         memory.log_proposal_step(
             proposal_id=proposal_id, branch_name=branch_name, status="merge_in_progress",
-            commit_message=current_commit_message, approved_by=current_approved_by,
-            validation_output=original_proposal.get('validation_output')
+            commit_message=commit_message, approved_by=approved_by,
+            validation_output=validation_output_original
         )
 
-        # Simulate merge work
-        time.sleep(3) # Simulate git operations
+        # Perform the merge using SelfModifier
+        # Assuming 'main' is the target branch, this could be configurable via AppSettings
+        target_main_branch = settings.get("main_branch_name", "main") # Example: get from settings or default
 
-        # Simulate a merge outcome
-        import random
-        merge_succeeded = random.choice([True, False]) # Simple random for stub
+        merge_success, merge_message = self_modifier.merge_branch(
+            branch_to_merge=branch_name,
+            target_branch=target_main_branch,
+            delete_branch_after_merge=True # Typically true for feature branches
+        )
 
-        if merge_succeeded:
-            merge_status = "merged"
-            logger.info(f"{log_prefix} Merge simulation: SUCCEEDED for branch '{branch_name}'.")
-            # In a real scenario, SelfModifier would do the merge and push.
-            # self_modifier_instance.merge_and_push(branch_name, target_branch="main")
+        final_status = "merged" if merge_success else "merge_failed"
+        final_validation_output = f"{validation_output_original or ''} | Merge attempt: {merge_message}"
+
+        if merge_success:
+            logger.info(f"{log_prefix} Merge successful for branch '{branch_name}' into '{target_main_branch}'. Message: {merge_message}")
         else:
-            merge_status = "merge_failed"
-            logger.warning(f"{log_prefix} Merge simulation: FAILED for branch '{branch_name}'. Possible conflicts or push errors.")
-            # Additional details about failure could be logged by SelfModifier.
+            logger.error(f"{log_prefix} Merge failed for branch '{branch_name}'. Message: {merge_message}")
 
         memory.log_proposal_step(
-            proposal_id=proposal_id,
-            branch_name=branch_name,
-            commit_message=current_commit_message,
-            status=merge_status,
-            approved_by=current_approved_by,
-            validation_output=original_proposal.get('validation_output') # Preserve validation, or add merge output
+            proposal_id=proposal_id, branch_name=branch_name, status=final_status,
+            commit_message=commit_message, approved_by=approved_by,
+            validation_output=final_validation_output.strip(" | ")
         )
-        return {"proposal_id": proposal_id, "status": merge_status, "branch": branch_name}
+
+        return {"proposal_id": proposal_id, "status": final_status, "message": merge_message}
 
     except Exception as e:
         logger.error(f"{log_prefix} Task critically failed. Error: {e}", exc_info=True)
-        if memory and proposal_id and branch_name:
+        if memory: # Attempt to log failure status
             try:
-                original_prop_data = memory.get_proposal_log(proposal_id)
-                cm = original_prop_data['commit_message'] if original_prop_data else "N/A"
-                ab = original_prop_data.get('approved_by') if original_prop_data else None
-                vo = original_prop_data.get('validation_output') if original_prop_data else None
-                memory.log_proposal_step(proposal_id=proposal_id, branch_name=branch_name, status="merge_error",
-                                         commit_message=cm, approved_by=ab, validation_output=vo + f" | Merge task error: {str(e)}")
+                # Ensure branch_name is available if error happened early
+                if not branch_name and proposal_id: # Try to fetch if not already set
+                    prop_data_for_error = memory.get_proposal_log(proposal_id)
+                    if prop_data_for_error:
+                        branch_name = prop_data_for_error.get('branch_name', 'unknown_branch_on_error')
+                        commit_message = prop_data_for_error.get('commit_message', commit_message)
+                        approved_by = prop_data_for_error.get('approved_by', approved_by)
+                        validation_output_original = prop_data_for_error.get('validation_output', validation_output_original)
+
+
+                current_vo = validation_output_original or ""
+                error_update_vo = f"{current_vo} | Merge task error: {str(e)}".strip(" | ")
+
+                memory.log_proposal_step(
+                    proposal_id=proposal_id,
+                    branch_name=branch_name or "unknown_branch", # Ensure branch_name is not None
+                    status="merge_error",
+                    commit_message=commit_message,
+                    approved_by=approved_by,
+                    validation_output=error_update_vo
+                )
             except Exception as log_e:
                 logger.error(f"{log_prefix} Failed to log merge_error status to memory: {log_e}", exc_info=True)
         raise

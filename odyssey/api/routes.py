@@ -514,14 +514,14 @@ async def propose_code_change_endpoint(
 
     # 3. Trigger asynchronous validation task (Celery)
     try:
-        # IMPORTANT: Ensure 'validate_proposal_task' is defined in odyssey.agent.tasks
+        # IMPORTANT: Ensure 'run_sandbox_validation_task' is defined in odyssey.agent.tasks
         # and registered with the Celery app.
-        from odyssey.agent.tasks import validate_proposal_task # Moved import here for clarity
-        validate_task_result = validate_proposal_task.delay(
+        from odyssey.agent.tasks import run_sandbox_validation_task # UPDATED TASK NAME
+        validate_task_result = run_sandbox_validation_task.delay( # UPDATED TASK NAME
             proposal_id=proposal_id,
             branch_name=actual_branch_name
         )
-        logger.info(f"Validation task ({validate_task_result.id}) triggered for proposal {proposal_id} on branch {actual_branch_name}.")
+        logger.info(f"Sandbox validation task ({validate_task_result.id}) triggered for proposal {proposal_id} on branch {actual_branch_name}.")
         # Update status to "validation_pending"
         memory.log_proposal_step(
             proposal_id=proposal_id,
@@ -639,11 +639,8 @@ async def approve_proposal_endpoint(
 
     # Trigger asynchronous merge task
     try:
-        from odyssey.agent.tasks import merge_proposal_task # Ensure this task is defined
-        merge_task_result = merge_proposal_task.delay(
-            proposal_id=proposal_id,
-            branch_name=proposal['branch_name']
-        )
+        from odyssey.agent.tasks import merge_approved_proposal_task # UPDATED TASK NAME
+        merge_task_result = merge_approved_proposal_task.delay(proposal_id=proposal_id) # UPDATED: only proposal_id
         logger.info(f"Merge task ({merge_task_result.id}) triggered for approved proposal {proposal_id} (branch: {proposal['branch_name']}).")
         # Update status to "merge_pending" or similar after triggering task
         memory.log_proposal_step(
