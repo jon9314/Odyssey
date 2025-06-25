@@ -33,9 +33,10 @@ class TestSelfModificationTasks(unittest.TestCase):
     @patch('odyssey.agent.tasks.MemoryManager')
     @patch('odyssey.agent.tasks.AppSettings') # Mock AppSettings to control repo_path etc.
     @patch('odyssey.agent.tasks.Sandbox') # Mock Sandbox
-    @patch('odyssey.agent.tasks.os.path.exists') # Mock os.path.exists for script check
-    def test_run_sandbox_validation_task_success_script_found(
-        self, mock_os_path_exists, mock_sandbox_cls, mock_app_settings_cls, mock_memory_manager_cls,
+    @patch('odyssey.agent.tasks.os.path.exists') # Keep this if Sandbox still uses it, but it's internal to Sandbox now
+    def test_run_sandbox_validation_task_success( # Renamed, script found is now internal to Sandbox mock
+        self, mock_os_path_exists_unused, # This mock might not be needed directly by task test if Sandbox handles path checks
+        mock_sandbox_cls, mock_app_settings_cls, mock_memory_manager_cls,
         mock_self_modifier_cls, mock_subprocess_run, mock_shutil_rmtree, mock_tempfile_mkdtemp
     ):
         proposal_id = "prop_valid_001"
@@ -49,7 +50,7 @@ class TestSelfModificationTasks(unittest.TestCase):
 
         mock_settings_instance = mock_app_settings_cls.return_value
         mock_settings_instance.memory_db_path = "dummy_db.sqlite"
-        mock_settings_instance.repo_path = mock_repo_path # Source repo for clone
+        mock_settings_instance.repo_path = mock_repo_path
 
         mock_mm_instance = mock_memory_manager_cls.return_value
         mock_mm_instance.get_proposal_log.return_value = {
@@ -57,43 +58,55 @@ class TestSelfModificationTasks(unittest.TestCase):
             'commit_message': original_commit_msg, 'status': 'proposed'
         }
 
-        mock_sm_instance_local = mock_self_modifier_cls.return_value # For the temp_repo_dir
-        mock_sm_instance_local.checkout_branch.return_value = True
+        # Mock for the SelfModifier instance used for the temporary clone
+        mock_sm_local_instance = MagicMock()
+        mock_sm_local_instance.checkout_branch.return_value = True
+        # This SM instance will have its own sandbox_manager (a Sandbox instance)
+        # Its sandbox_test method will be called.
+        mock_sm_local_instance.sandbox_test.return_value = (True, "Docker validation passed via mock")
+
+        # SelfModifier class mock will return our sm_local_instance when called with temp_repo_dir
+        # The key is how SelfModifier is instantiated in the task now.
+        # The task does: sandbox_manager_instance = Sandbox(); local_self_modifier = SelfModifier(repo_path=temp_repo_dir, sandbox_manager=sandbox_manager_instance)
+        # So, we need mock_self_modifier_cls to return mock_sm_local_instance when its __init__ is called.
+        mock_self_modifier_cls.return_value = mock_sm_local_instance
+
+        # Mock for Sandbox instantiation within the task
+        mock_sandbox_instance = mock_sandbox_cls.return_value
+        # We don't need to mock methods on mock_sandbox_instance directly here if we mock
+        # SelfModifier's sandbox_test method's return value, which is simpler for this test.
+        # However, the task instantiates Sandbox() then passes it to SelfModifier.
+        # So SelfModifier(..., sandbox_manager=mock_sandbox_instance) will be called.
 
         # Mock subprocess.run for git clone
         mock_clone_result = MagicMock()
         mock_clone_result.returncode = 0
         mock_clone_result.stdout = "Cloned successfully"
         mock_clone_result.stderr = ""
+        mock_subprocess_run.return_value = mock_clone_result # Only for clone now
 
-        # Mock subprocess.run for test script execution
-        mock_test_script_result = MagicMock()
-        mock_test_script_result.returncode = 0
-        mock_test_script_result.stdout = "All tests passed!"
-        mock_test_script_result.stderr = ""
+        # Mock SelfModifier's _run_git_command for the 'git fetch origin' call
+        # This is called by local_self_modifier inside the task.
+        mock_sm_local_instance._run_git_command.return_value = ("fetch_stdout", "fetch_stderr", 0)
 
-        # Order of calls for subprocess.run: 1. git clone, 2. test script
-        mock_subprocess_run.side_effect = [mock_clone_result, mock_test_script_result]
-
-        mock_os_path_exists.return_value = True # Assume test script exists
 
         # Execute the task
-        result = run_sandbox_validation_task.delay(proposal_id, branch_name).get(timeout=10) # .get() for eager result
+        result = run_sandbox_validation_task.delay(proposal_id, branch_name).get(timeout=10)
 
         # Assertions
         mock_tempfile_mkdtemp.assert_called_once()
-        mock_subprocess_run.assert_any_call(
+        mock_subprocess_run.assert_called_once_with( # git clone
             ["git", "clone", mock_repo_path, mock_temp_dir],
             capture_output=True, text=True, check=False
         )
-        mock_self_modifier_cls.assert_called_with(repo_path=mock_temp_dir) # SM for temp dir
-        mock_sm_instance_local.checkout_branch.assert_called_with(branch_name)
 
-        mock_os_path_exists.assert_called_with(os.path.join(mock_temp_dir, "scripts/run_tests.sh"))
-        mock_subprocess_run.assert_any_call(
-            [os.path.join(mock_temp_dir, "scripts/run_tests.sh")],
-            cwd=mock_temp_dir, capture_output=True, text=True, check=False, timeout=ANY
-        )
+        # Check SelfModifier instantiation for the local clone
+        mock_self_modifier_cls.assert_called_with(repo_path=mock_temp_dir, sandbox_manager=mock_sandbox_instance)
+
+        # Check calls on the local SelfModifier instance
+        mock_sm_local_instance._run_git_command.assert_called_with(["fetch", "origin"], raise_on_error=False)
+        mock_sm_local_instance.checkout_branch.assert_called_with(branch_name)
+        mock_sm_local_instance.sandbox_test.assert_called_once_with(repo_clone_path=mock_temp_dir, proposal_id=proposal_id)
 
         mock_mm_instance.log_proposal_step.assert_any_call(
             proposal_id=proposal_id, branch_name=branch_name, status="validation_in_progress",
@@ -101,9 +114,10 @@ class TestSelfModificationTasks(unittest.TestCase):
         )
         mock_mm_instance.log_proposal_step.assert_called_with(
             proposal_id=proposal_id, branch_name=branch_name, status="validation_passed",
-            commit_message=original_commit_msg, validation_output=ANY # Check content if needed
+            commit_message=original_commit_msg, validation_output="Docker validation passed via mock"
         )
         self.assertEqual(result['status'], "validation_passed")
+        self.assertEqual(result['output'], "Docker validation passed via mock")
         mock_shutil_rmtree.assert_called_with(mock_temp_dir)
         mock_mm_instance.close.assert_called_once()
 

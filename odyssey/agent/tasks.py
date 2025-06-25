@@ -252,85 +252,47 @@ def run_sandbox_validation_task(self, proposal_id: str, branch_name: str) -> Dic
 
         # 3. Fetch and checkout the specific proposal branch
         logger.info(f"{log_prefix} Fetching and checking out branch '{branch_name}' in temporary clone.")
-        # Fetch the specific branch. This assumes 'origin' in the temp clone refers to the source repo.
-        # This might need adjustment if the clone source is local.
-        # A safer way is to fetch all and then checkout.
-        # _, _, ret_fetch = local_self_modifier._run_git_command(["fetch", "origin", branch_name], raise_on_error=False)
-        # if ret_fetch != 0:
-        #     logger.warning(f"{log_prefix} Could not fetch branch '{branch_name}'. May already be present or error. Stderr: {local_self_modifier._run_git_command(['fetch', 'origin', branch_name])[1]}")
+
+        # Initialize SelfModifier with the path to the temporary clone.
+        # Also pass the sandbox_manager instance to this SelfModifier.
+        sandbox_manager_instance = Sandbox() # Create a Sandbox instance for this task
+        local_self_modifier = SelfModifier(repo_path=temp_repo_dir, sandbox_manager=sandbox_manager_instance)
+
+        # Checkout the branch in the temporary directory.
+        # The `propose_code_changes` should have pushed it, so it should be available via fetch/pull.
+        # First, ensure remote 'origin' is set up correctly in the clone if it's a simple file path clone.
+        # A full clone already has 'origin'.
+        # Fetch from origin to get all branches including the new one.
+        fetch_stdout, fetch_stderr, fetch_ret = local_self_modifier._run_git_command(["fetch", "origin"], raise_on_error=False)
+        if fetch_ret != 0:
+            logger.warning(f"{log_prefix} 'git fetch origin' in temp clone failed. Stderr: {fetch_stderr}. Stdout: {fetch_stdout}. Branch '{branch_name}' might not be found if purely local to original repo and not pushed.")
+            # This might not be critical if the branch was created from an existing remote branch or if it was pushed.
 
         if not local_self_modifier.checkout_branch(branch_name):
-            # If checkout fails, it might be because the branch is not fetched.
-            # Let's try a more robust fetch and checkout sequence.
-            logger.info(f"{log_prefix} Initial checkout failed. Attempting git pull origin {branch_name}.")
-            # This assumes the branch exists on the remote 'origin' of the temp clone's source.
-            # This will create a local branch tracking the remote one if it exists.
-            _, stderr_pull, ret_pull = local_self_modifier._run_git_command(["pull", "origin", branch_name], raise_on_error=False)
-            if ret_pull != 0:
-                 error_msg = f"Failed to checkout branch '{branch_name}' in temporary clone even after pull attempt. Error: {stderr_pull}"
-                 logger.error(f"{log_prefix} {error_msg}")
-                 raise Exception(error_msg)
-            logger.info(f"{log_prefix} Successfully checked out branch '{branch_name}' after pull.")
+            # If checkout fails, it might be because the branch is not fetched or doesn't exist.
+            # The `checkout_branch` method itself logs errors.
+            error_msg = f"Failed to checkout branch '{branch_name}' in temporary clone."
+            logger.error(f"{log_prefix} {error_msg}")
+            # Attempt to provide more context if fetch failed significantly
+            if fetch_ret !=0 :
+                 error_msg += f" Previous fetch also had issues: {fetch_stderr}"
+            raise Exception(error_msg)
+        logger.info(f"{log_prefix} Successfully checked out branch '{branch_name}' in temporary clone.")
 
+        # 4. Run Validation using SelfModifier's sandbox_test (which uses Sandbox.run_validation_in_docker)
+        logger.info(f"{log_prefix} Handing off to SelfModifier.sandbox_test for Docker validation.")
 
-        # 4. Run Build/Tests (Sandbox simulation)
-        logger.info(f"{log_prefix} Starting simulated build and test process for branch '{branch_name}'.")
-        sandbox = Sandbox() # Initialize sandbox for this task
+        # `sandbox_test` now takes `repo_clone_path` and `proposal_id`.
+        # `local_self_modifier` is already initialized with `repo_path=temp_repo_dir`.
+        # So, we pass `temp_repo_dir` as the path and `proposal_id`.
+        validation_success, validation_output_log = local_self_modifier.sandbox_test(
+            repo_clone_path=temp_repo_dir, # Pass the path it should operate on
+            proposal_id=proposal_id
+        )
 
-        validation_output = ""
-        validation_status = "validation_failed" # Default to failed
-
-        # --- Docker-based validation (Preferred) ---
-        dockerfile_path = os.path.join(temp_repo_dir, "Dockerfile") # Standard Dockerfile location
-        # dockerfile_alt_path = os.path.join(temp_repo_dir, "docker", "Dockerfile") # Alternative
-
-        # For now, simulate test execution.
-        # In a real scenario, you'd check for dockerfile_path, build, and run tests.
-        # For this stub, we'll simulate:
-        time.sleep(10) # Simulate longer work: build, test execution
-
-        # Example: Simulate running a test script using Sandbox's test_code
-        # This would be a script *within the cloned repository*
-        test_script_in_repo = "scripts/run_tests.sh" # Example path within the repo
-        full_test_script_path = os.path.join(temp_repo_dir, test_script_in_repo)
-
-        if os.path.exists(full_test_script_path):
-            logger.info(f"{log_prefix} Found test script at '{test_script_in_repo}'. Executing...")
-            # This would need the script to be executable and set up correctly.
-            # For now, this is a placeholder for actual execution logic.
-            # We'd use subprocess.run directly here, setting cwd=temp_repo_dir
-            try:
-                test_run_process = subprocess.run(
-                    [full_test_script_path], # Or ['python', '-m', 'unittest', 'discover'] etc.
-                    cwd=temp_repo_dir,
-                    capture_output=True, text=True, check=False, timeout=300 # 5 min timeout
-                )
-                validation_output += f"Test Script STDOUT:\n{test_run_process.stdout}\n"
-                validation_output += f"Test Script STDERR:\n{test_run_process.stderr}\n"
-                if test_run_process.returncode == 0:
-                    validation_status = "validation_passed"
-                    logger.info(f"{log_prefix} Test script '{test_script_in_repo}' executed successfully.")
-                else:
-                    logger.warning(f"{log_prefix} Test script '{test_script_in_repo}' failed. Exit code: {test_run_process.returncode}")
-            except subprocess.TimeoutExpired:
-                error_msg = "Test script execution timed out."
-                logger.error(f"{log_prefix} {error_msg}")
-                validation_output += f"ERROR: {error_msg}\n"
-            except Exception as e_test:
-                error_msg = f"Error executing test script: {e_test}"
-                logger.error(f"{log_prefix} {error_msg}", exc_info=True)
-                validation_output += f"ERROR: {error_msg}\n"
-        else:
-            logger.warning(f"{log_prefix} Test script '{test_script_in_repo}' not found. Simulating basic pass/fail.")
-            # Fallback to random simulation if no script
-            import random
-            if random.choice([True, True, False]):
-                validation_status = "validation_passed"
-                validation_output = "Simulated tests passed. (No test script found)"
-            else:
-                validation_output = "Simulated tests failed. (No test script found)"
-
-        logger.info(f"{log_prefix} Validation result: {validation_status}. Output: {validation_output[:500]}...")
+        validation_status = "validation_passed" if validation_success else "validation_failed"
+        logger.info(f"{log_prefix} Docker validation completed. Status: {validation_status}.")
+        # The full log is in validation_output_log
 
         # 5. Update MemoryManager
         memory.log_proposal_step(

@@ -32,7 +32,7 @@ class SelfModifier:
         if not is_repo:
             logger.debug(f"Path '{self.repo_path}' .git directory check failed. Not a Git repository.")
         return is_repo
-        return os.path.isdir(os.path.join(self.repo_path, ".git"))
+        # return os.path.isdir(os.path.join(self.repo_path, ".git")) # Duplicate line removed
 
     def _run_git_command(self, command: list, raise_on_error=True) -> tuple[str, str, int]:
         """Helper to run Git commands."""
@@ -308,73 +308,45 @@ class SelfModifier:
         # TODO: Implement GitHub API call using self.github_token
         return f"Error: PR opening via API not yet implemented. Please open PR for branch '{branch}' manually."
 
-
-    def sandbox_test(self, branch: str) -> bool:
+    # Updated method signature and logic
+    def sandbox_test(self, repo_clone_path: str, proposal_id: str) -> tuple[bool, str]:
         """
-        Checks out the specified branch and runs tests in a sandbox.
-        :param branch: The branch to test.
-        :return: True if tests pass, False otherwise.
+        Runs validation tests for the code in the specified repository clone path using Docker.
+        This method assumes the correct branch is already checked out in repo_clone_path.
+        :param repo_clone_path: The absolute path to the cloned repository where the proposal branch is checked out.
+        :param proposal_id: The ID of the proposal, used for naming Docker images/containers.
+        :return: Tuple (success: bool, output_log: str)
         """
-        logger.info(f"Starting sandbox test for branch: {branch}")
+        logger.info(f"Starting sandbox Docker validation for proposal '{proposal_id}' in path: {repo_clone_path}")
         if not self.sandbox_manager:
-            logger.error("Sandbox manager not provided. Cannot run sandbox tests.")
-            return False
+            msg = "Sandbox manager not provided to SelfModifier. Cannot run sandbox tests."
+            logger.error(msg)
+            return False, msg
 
-        original_branch, _, ret_code = self._run_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
-        if ret_code != 0:
-            logger.error(f"Could not get current branch: {original_branch}")
-            return False
+        # Ensure sandbox_manager has the new method.
+        if not hasattr(self.sandbox_manager, 'run_validation_in_docker'):
+            msg = "Sandbox manager does not support 'run_validation_in_docker'. Update sandbox or SelfModifier initialization."
+            logger.error(msg)
+            return False, msg
 
         try:
-            # Fetch latest changes and checkout the branch
-            self._run_git_command(["fetch", "origin", branch])
-            _, stderr, ret_code = self._run_git_command(["checkout", branch])
-            if ret_code != 0:
-                logger.error(f"Could not checkout branch '{branch}': {stderr}")
-                return False
+            # The repo_clone_path is already the specific directory with the checked-out branch.
+            # No need for SelfModifier to do further git operations here for testing.
+            # It directly calls the sandbox_manager's Docker validation method.
+            success, output_log = self.sandbox_manager.run_validation_in_docker(repo_clone_path, proposal_id)
 
-            # Pull latest changes for the branch
-            _, stderr, ret_code = self._run_git_command(["pull", "origin", branch])
-            if ret_code != 0:
-                logger.warning(f"Could not pull latest changes for branch '{branch}': {stderr}. Proceeding with local version.")
-
-            # TODO: Define what "tests" mean. This could be:
-            # 1. Running a specific test script (e.g., scripts/test_runner.py)
-            # 2. Checking if the application starts
-            # 3. Linting, type checking, etc.
-            # For now, assume sandbox_manager has a method like `run_validation_script`
-            # and it knows where the project root is or can be told.
-            # The sandbox_manager.test_code() expects a script path.
-
-            # Example: Using a predefined test script from the `scripts` directory
-            test_script_path = os.path.join(self.repo_path, "scripts", "test_runner.py") # Adjust if needed
-            if not os.path.exists(test_script_path):
-                logger.error(f"Test script not found at {test_script_path}")
-                return False
-
-            logger.info(f"Running test script '{test_script_path}' in sandbox for branch '{branch}'.")
-            # The sandbox's test_code method needs to be robust.
-            # It should ideally operate on a copy of the checked-out branch, not the live repo_path.
-            # For this skeleton, we assume it runs on the current state of repo_path.
-            result_output = self.sandbox_manager.test_code(test_script_path)
-            logger.debug(f"Sandbox test output:\n{result_output}")
-
-            # Parse result_output to determine pass/fail
-            # This is highly dependent on the output format of your test_runner.py
-            if "Tests passed" in result_output and "Tests failed" not in result_output and "Error" not in result_output: # Basic check
-                logger.info(f"Sandbox tests passed for branch '{branch}'.")
-                return True
+            if success:
+                logger.info(f"Sandbox Docker validation PASSED for proposal '{proposal_id}'.")
             else:
-                logger.warning(f"Sandbox tests failed for branch '{branch}'. Output:\n{result_output}")
-                return False
+                logger.warning(f"Sandbox Docker validation FAILED for proposal '{proposal_id}'.")
+
+            logger.debug(f"Sandbox validation output for proposal '{proposal_id}':\n{output_log}")
+            return success, output_log
 
         except Exception as e:
-            logger.error(f"Exception during sandbox test for branch '{branch}': {e}")
-            return False
-        finally:
-            # Always switch back to the original branch
-            self._run_git_command(["checkout", original_branch], raise_on_error=False)
-            logger.info(f"Switched back to original branch: {original_branch}")
+            error_msg = f"Exception during sandbox_test for proposal '{proposal_id}': {e}"
+            logger.error(error_msg, exc_info=True)
+            return False, error_msg
 
 
     def merge_pr(self, pr_id: str, merge_method: str = "merge") -> bool: # Changed return to bool
