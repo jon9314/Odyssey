@@ -33,16 +33,21 @@ from .schemas import (
     MessageResponse, # General message response
     LLMAskRequest, LLMAskResponse, # LLM Schemas
     AddNumbersTaskRequest, SimulateLongTaskRequest, # Specific Celery task requests
-    AsyncTaskResponse, AsyncTaskStatusResponse # Generic Celery task responses
+    AsyncTaskResponse, AsyncTaskStatusResponse, # Generic Celery task responses
+    ProposeChangeRequestSchema, ProposalResponseSchema, ProposalStatusResponseSchema, # Self Modification Schemas
+    SemanticAddRequest, SemanticAddResponse, SemanticQueryRequest, SemanticQueryResponse, SemanticQueryResponseItem, SemanticErrorResponse # Semantic Memory Schemas
 )
 import logging # For logging within route handlers if needed
+import uuid # For generating proposal IDs
 
 # Import Core Components for dependency injection
 from odyssey.agent.memory import MemoryManager
 from odyssey.agent.ollama_client import OllamaClient
-from odyssey.agent.tool_manager import ToolManager # Import ToolManager
+from odyssey.agent.tool_manager import ToolManager
+from odyssey.agent.self_modifier import SelfModifier # Import SelfModifier
 from odyssey.agent.celery_app import celery_app # For accessing Celery app instance
 from celery.result import AsyncResult # For checking task status
+# from odyssey.agent.tasks import validate_proposal_task, merge_proposal_task # Will be used later
 
 
 # Logger for this module (routes)
@@ -93,6 +98,16 @@ async def get_tool_manager() -> ToolManager:
         get_tool_manager.instance = ToolManager()
         get_tool_manager.instance.discover_and_register_plugins(plugin_dir_path=plugins_dir) # Discover for fallback
     return get_tool_manager.instance
+
+async def get_self_modifier() -> SelfModifier:
+    """Dependency function to get the SelfModifier instance."""
+    if not hasattr(get_self_modifier, "instance"):
+        print("Warning: get_self_modifier.instance not set by main.py lifespan. Creating fallback.")
+        # SelfModifier might need specific config (e.g., repo path) not available here.
+        # This highlights the importance of initialization in main.py.
+        # Assuming SelfModifier can be initialized without specific args for a basic fallback.
+        get_self_modifier.instance = SelfModifier(repo_path=".") # Adjust repo_path if necessary for fallback
+    return get_self_modifier.instance
 
 router = APIRouter()
 
@@ -395,31 +410,6 @@ async def execute_tool_endpoint(
             result=execution_outcome
         )
 
-# --- Self-Modification Endpoints (Conceptual - from previous structure) ---
-# These are more complex and would require SelfModifier integration.
-# For now, they remain as conceptual placeholders.
-class ProposeChangeRequest(BaseModel):
-    files: Dict[str, str]
-    commit_message: str
-    branch_name: Optional[str] = None
-
-class ProposeChangeResponse(BaseModel):
-    branch_name: str
-    status: str
-    message: Optional[str] = None
-    pr_url: Optional[str] = None
-
-@router.post("/self-modify/propose", response_model=ProposeChangeResponse, tags=["Self Modification"])
-async def propose_code_change(request_body: ProposeChangeRequest):
-    """Allows the agent (or an admin) to propose code changes (mocked)."""
-    print(f"Mock propose change: Commit '{request_body.commit_message}', Branch: {request_body.branch_name or 'auto'}")
-    return ProposeChangeResponse(
-        branch_name=request_body.branch_name or f"feature/proposal-{os.urandom(3).hex()}",
-        status="proposed_mock",
-        message="Change proposed locally (mock). PR creation would follow.",
-        pr_url=f"http://github.com/mock-org/odyssey/pull/{(len(os.urandom(1)) % 5) + 1}"
-    )
-
 # --- LLM Interaction Endpoint ---
 @router.post("/llm/ask", response_model=LLMAskResponse, tags=["LLM"])
 async def ask_llm(
@@ -465,6 +455,474 @@ async def ask_llm(
 # For now, they are just commented out.
 # fake_items_db = {"item1": {"id": "item1", "name": "Foo", "description": "A foo item"}, "item2": {"id": "item2", "name": "Bar", "description": "A bar item"}}
 # @router.get("/items/", response_model=List[Item], tags=["Example Items"])
+# --- End of File ---
+
+# --- Self Modification Endpoints ---
+@router.post("/self-modify/propose", response_model=ProposalResponseSchema, status_code=202, tags=["Self Modification"])
+async def propose_code_change_endpoint(
+    request_data: ProposeChangeRequestSchema,
+    self_modifier: SelfModifier = Depends(get_self_modifier),
+    memory: MemoryManager = Depends(get_memory_manager)
+):
+    """
+    Accepts a code change proposal, creates a branch with the changes,
+    logs the proposal, and triggers an asynchronous validation task.
+    """
+    logger.info(f"Received proposal to modify files with commit: '{request_data.commit_message}'")
+
+    proposal_id = f"prop_{uuid.uuid4().hex[:10]}"
+    initial_status = "proposed"
+
+    try:
+        # 1. Propose code changes using SelfModifier
+        # Assuming propose_code_changes returns the actual branch name used.
+        actual_branch_name = self_modifier.propose_code_changes(
+            files_content=request_data.files_content,
+            commit_message=request_data.commit_message,
+            branch_prefix=request_data.branch_prefix,
+            proposal_id=proposal_id # Pass proposal_id for branch naming consistency if desired
+        )
+        logger.info(f"Code changes proposed on branch: {actual_branch_name} for proposal ID: {proposal_id}")
+
+    except Exception as e:
+        logger.error(f"Error during self_modifier.propose_code_changes for proposal {proposal_id}: {e}", exc_info=True)
+        # Attempt to log failure to propose if branch creation failed.
+        # This part is tricky if branch_name was never even created.
+        # Using a placeholder branch name for logging if actual_branch_name is not available.
+        failed_branch_name = f"{request_data.branch_prefix or 'proposal'}_{proposal_id}_failed"
+        memory.log_proposal_step(
+            proposal_id=proposal_id,
+            branch_name=failed_branch_name, # Log with a generated name if creation failed
+            commit_message=request_data.commit_message,
+            status="proposal_failed", # A status indicating failure at the proposal stage itself
+            validation_output=f"Error creating branch/commit: {str(e)}"
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to propose code changes: {str(e)}")
+
+    # 2. Log the proposal step in MemoryManager
+    log_success = memory.log_proposal_step(
+        proposal_id=proposal_id,
+        branch_name=actual_branch_name,
+        commit_message=request_data.commit_message,
+        status=initial_status
+    )
+    if not log_success:
+        # This is a critical error, as the proposal is made but not tracked.
+        # Manual intervention might be needed.
+        logger.error(f"CRITICAL: Failed to log proposal {proposal_id} (branch: {actual_branch_name}) to memory after changes were made.")
+        # We might still raise HTTPException, but the system is in an inconsistent state.
+        raise HTTPException(status_code=500, detail=f"Proposal created on branch {actual_branch_name} but failed to log to memory. Please check system integrity.")
+
+    # 3. Trigger asynchronous validation task (Celery)
+    try:
+        # IMPORTANT: Ensure 'run_sandbox_validation_task' is defined in odyssey.agent.tasks
+        # and registered with the Celery app.
+        from odyssey.agent.tasks import run_sandbox_validation_task # UPDATED TASK NAME
+        validate_task_result = run_sandbox_validation_task.delay( # UPDATED TASK NAME
+            proposal_id=proposal_id,
+            branch_name=actual_branch_name
+        )
+        logger.info(f"Sandbox validation task ({validate_task_result.id}) triggered for proposal {proposal_id} on branch {actual_branch_name}.")
+        # Update status to "validation_pending"
+        memory.log_proposal_step(
+            proposal_id=proposal_id,
+            branch_name=actual_branch_name,
+            commit_message=request_data.commit_message,
+            status="validation_pending"
+        )
+    except ImportError:
+        logger.error("Celery task 'validate_proposal_task' not found. Validation cannot be triggered.", exc_info=True)
+        # Update status to reflect this problem
+        memory.log_proposal_step(
+            proposal_id=proposal_id,
+            branch_name=actual_branch_name,
+            commit_message=request_data.commit_message,
+            status="validation_error",
+            validation_output="Failed to trigger validation: Task not found."
+        )
+        # Return a success response for proposal creation, but with a warning message.
+        return ProposalResponseSchema(
+            proposal_id=proposal_id,
+            branch_name=actual_branch_name,
+            status="validation_error",
+            message="Proposal created, but automatic validation could not be started. Task not found."
+        )
+    except Exception as e:
+        logger.error(f"Error triggering validation task for proposal {proposal_id}: {e}", exc_info=True)
+        memory.log_proposal_step(
+            proposal_id=proposal_id,
+            branch_name=actual_branch_name,
+            commit_message=request_data.commit_message,
+            status="validation_error",
+            validation_output=f"Failed to trigger validation: {str(e)}"
+        )
+        return ProposalResponseSchema(
+            proposal_id=proposal_id,
+            branch_name=actual_branch_name,
+            status="validation_error",
+            message=f"Proposal created, but automatic validation failed to start: {str(e)}"
+        )
+
+    return ProposalResponseSchema(
+        proposal_id=proposal_id,
+        branch_name=actual_branch_name,
+        status="validation_pending", # Updated status
+        message="Proposal submitted successfully. Code changes created, logged, and validation task triggered."
+    )
+
+
+@router.get("/self-modify/proposals", response_model=List[ProposalStatusResponseSchema], tags=["Self Modification"])
+async def list_all_proposals(
+    limit: int = Query(50, ge=1, le=200, description="Maximum number of proposals to return."),
+    memory: MemoryManager = Depends(get_memory_manager)
+):
+    """Lists all self-modification proposals and their current statuses."""
+    proposals_data = memory.list_proposals(limit=limit)
+    # Convert list of dicts to list of Pydantic models
+    # The ProposalStatusResponseSchema has orm_mode = True, so it can be initialized from dicts
+    return [ProposalStatusResponseSchema(**p) for p in proposals_data]
+
+
+@router.get("/self-modify/proposals/{proposal_id}", response_model=ProposalStatusResponseSchema, tags=["Self Modification"])
+async def get_proposal_details(
+    proposal_id: str = Path(..., description="The ID of the proposal to retrieve."),
+    memory: MemoryManager = Depends(get_memory_manager)
+):
+    """Returns the full log/status for a specific proposal."""
+    proposal_data = memory.get_proposal_log(proposal_id=proposal_id)
+    if not proposal_data:
+        logger.warning(f"Proposal with ID '{proposal_id}' not found in memory.")
+        raise HTTPException(status_code=404, detail=f"Proposal with ID '{proposal_id}' not found.")
+    return ProposalStatusResponseSchema(**proposal_data)
+
+
+@router.post("/self-modify/proposals/{proposal_id}/approve", response_model=ProposalResponseSchema, tags=["Self Modification"])
+async def approve_proposal_endpoint(
+    proposal_id: str = Path(..., description="The ID of the proposal to approve."),
+    # In a real system, might take an optional 'approved_by' from authenticated user
+    memory: MemoryManager = Depends(get_memory_manager),
+    # self_modifier: SelfModifier = Depends(get_self_modifier) # Needed if merge is synchronous
+):
+    """
+    Marks a proposal as approved (if validation passed) and triggers an asynchronous merge task.
+    """
+    logger.info(f"Attempting to approve proposal ID: {proposal_id}")
+    proposal = memory.get_proposal_log(proposal_id)
+
+    if not proposal:
+        logger.warning(f"Approval failed: Proposal ID '{proposal_id}' not found.")
+        raise HTTPException(status_code=404, detail=f"Proposal with ID '{proposal_id}' not found.")
+
+    # Validate current status for approval
+    # Allowed previous statuses: "validation_passed"
+    # Or, if re-approval is allowed after a failed merge attempt: "merge_failed"
+    allowed_statuses_for_approval = ["validation_passed", "merge_failed"] # Example
+    if proposal['status'] not in allowed_statuses_for_approval:
+        logger.warning(f"Approval failed for proposal '{proposal_id}': Current status is '{proposal['status']}', requires one of {allowed_statuses_for_approval}.")
+        raise HTTPException(
+            status_code=409, # Conflict with current state
+            detail=f"Proposal cannot be approved. Current status is '{proposal['status']}'. Expected one of {allowed_statuses_for_approval}."
+        )
+
+    # Log approval step
+    approved_by_user = "api_user" # Placeholder; derive from auth context in real app
+    update_success = memory.log_proposal_step(
+        proposal_id=proposal_id,
+        branch_name=proposal['branch_name'],
+        commit_message=proposal['commit_message'],
+        status="user_approved",
+        approved_by=approved_by_user,
+        validation_output=proposal.get('validation_output') # Preserve existing validation output
+    )
+    if not update_success:
+        logger.error(f"Failed to update proposal '{proposal_id}' status to 'user_approved' in memory.")
+        raise HTTPException(status_code=500, detail="Failed to update proposal status in memory.")
+
+    # Trigger asynchronous merge task
+    try:
+        from odyssey.agent.tasks import merge_approved_proposal_task # UPDATED TASK NAME
+        merge_task_result = merge_approved_proposal_task.delay(proposal_id=proposal_id) # UPDATED: only proposal_id
+        logger.info(f"Merge task ({merge_task_result.id}) triggered for approved proposal {proposal_id} (branch: {proposal['branch_name']}).")
+        # Update status to "merge_pending" or similar after triggering task
+        memory.log_proposal_step(
+            proposal_id=proposal_id,
+            branch_name=proposal['branch_name'],
+            commit_message=proposal['commit_message'],
+            status="merge_pending", # New status indicating merge is queued
+            approved_by=approved_by_user,
+            validation_output=proposal.get('validation_output')
+        )
+    except ImportError:
+        logger.error("Celery task 'merge_proposal_task' not found. Merge cannot be triggered.", exc_info=True)
+        memory.log_proposal_step(
+            proposal_id=proposal_id, branch_name=proposal['branch_name'], commit_message=proposal['commit_message'],
+            status="merge_error", approved_by=approved_by_user, validation_output="Failed to trigger merge: Task not found."
+        )
+        return ProposalResponseSchema(
+            proposal_id=proposal_id, branch_name=proposal['branch_name'], status="merge_error",
+            message="Proposal approved, but automatic merge could not be started: Merge task not found."
+        )
+    except Exception as e:
+        logger.error(f"Error triggering merge task for proposal {proposal_id}: {e}", exc_info=True)
+        memory.log_proposal_step(
+            proposal_id=proposal_id, branch_name=proposal['branch_name'], commit_message=proposal['commit_message'],
+            status="merge_error", approved_by=approved_by_user, validation_output=f"Failed to trigger merge: {str(e)}"
+        )
+        return ProposalResponseSchema(
+            proposal_id=proposal_id, branch_name=proposal['branch_name'], status="merge_error",
+            message=f"Proposal approved, but automatic merge failed to start: {str(e)}"
+        )
+
+    return ProposalResponseSchema(
+        proposal_id=proposal_id,
+        branch_name=proposal['branch_name'],
+        status="merge_pending", # Return the new status
+        message=f"Proposal '{proposal_id}' approved by {approved_by_user}. Merge task triggered."
+    )
+
+
+@router.post("/self-modify/proposals/{proposal_id}/reject", response_model=ProposalResponseSchema, tags=["Self Modification"])
+async def reject_proposal_endpoint(
+    proposal_id: str = Path(..., description="The ID of the proposal to reject."),
+    memory: MemoryManager = Depends(get_memory_manager)
+    # Potentially add a 'reason: Optional[str] = Body(None)' if rejection reasons are needed
+):
+    """Marks a proposal as rejected and logs the action."""
+    logger.info(f"Attempting to reject proposal ID: {proposal_id}")
+    proposal = memory.get_proposal_log(proposal_id)
+
+    if not proposal:
+        logger.warning(f"Rejection failed: Proposal ID '{proposal_id}' not found.")
+        raise HTTPException(status_code=404, detail=f"Proposal with ID '{proposal_id}' not found.")
+
+    # Prevent re-rejecting an already rejected or merged proposal
+    if proposal['status'] in ["rejected", "merged"]:
+        logger.info(f"Proposal '{proposal_id}' is already in status '{proposal['status']}'. No action taken for rejection.")
+        return ProposalResponseSchema(
+            proposal_id=proposal_id,
+            branch_name=proposal['branch_name'],
+            status=proposal['status'], # Return current status
+            message=f"Proposal is already in status '{proposal['status']}'. No change made."
+        )
+
+    # Log rejection step
+    # 'rejected_by' could be added if there's user context
+    update_success = memory.log_proposal_step(
+        proposal_id=proposal_id,
+        branch_name=proposal['branch_name'],
+        commit_message=proposal['commit_message'],
+        status="rejected",
+        # validation_output could be updated with a rejection reason if provided
+        validation_output=proposal.get('validation_output') # Preserve or update
+    )
+
+    if not update_success:
+        logger.error(f"Failed to update proposal '{proposal_id}' status to 'rejected' in memory.")
+        raise HTTPException(status_code=500, detail="Failed to update proposal status in memory.")
+
+    logger.info(f"Proposal '{proposal_id}' has been rejected.")
+    return ProposalResponseSchema(
+        proposal_id=proposal_id,
+        branch_name=proposal['branch_name'],
+        status="rejected",
+        message=f"Proposal '{proposal_id}' has been successfully rejected."
+    )
+
+
+# Clean up old placeholder self-modify endpoint and schemas if they were present directly in routes.py
+# The original routes.py had:
+# class ProposeChangeRequest(BaseModel): ...
+# class ProposeChangeResponse(BaseModel): ...
+# @router.post("/self-modify/propose", response_model=ProposeChangeResponse, tags=["Self Modification"])
+# async def propose_code_change(request_body: ProposeChangeRequest): ...
+# These are now replaced by the new schemas in schemas.py and the new propose_code_change_endpoint.
+# I will search for and remove these exact old definitions if they are still in this file.
+
+# --- Placeholder Removal ---
+# The following is a conceptual search and removal. If the grep tool were available, I'd use it.
+# For now, I'll assume they were defined as shown above and remove them if present.
+# This step will be done by carefully inspecting the final content of routes.py.
+# (Manual Check: The old placeholders were indeed present and should be removed)
+# The placeholder code was:
+# class ProposeChangeRequest(BaseModel):
+# files: Dict[str, str]
+# commit_message: str
+# branch_name: Optional[str] = None
+
+# class ProposeChangeResponse(BaseModel):
+# branch_name: str
+# status: str
+# message: Optional[str] = None
+# pr_url: Optional[str] = None
+
+# @router.post("/self-modify/propose", response_model=ProposeChangeResponse, tags=["Self Modification"])
+# async def propose_code_change(request_body: ProposeChangeRequest):
+# """Allows the agent (or an admin) to propose code changes (mocked)."""
+# print(f"Mock propose change: Commit '{request_body.commit_message}', Branch: {request_body.branch_name or 'auto'}")
+# return ProposeChangeResponse(
+# branch_name=request_body.branch_name or f"feature/proposal-{os.urandom(3).hex()}",
+# status="proposed_mock",
+# message="Change proposed locally (mock). PR creation would follow.",
+# pr_url=f"http://github.com/mock-org/odyssey/pull/{(len(os.urandom(1)) % 5) + 1}"
+# )
+# This section will be deleted.
+
+# --- Semantic Memory Endpoints ---
+# Creating a new router for memory specific endpoints for better organization
+memory_router = APIRouter(prefix="/memory", tags=["Memory Management"])
+
+@memory_router.post(
+    "/semantic/add",
+    response_model=SemanticAddResponse,
+    responses={
+        201: {"model": SemanticAddResponse, "description": "Entry added successfully"},
+        400: {"model": SemanticErrorResponse, "description": "Invalid request (e.g., missing text)"},
+        500: {"model": SemanticErrorResponse, "description": "Internal server error adding entry"},
+        503: {"model": SemanticErrorResponse, "description": "Vector store unavailable"}
+    },
+    status_code=201
+)
+async def add_semantic_entry(
+    request_data: SemanticAddRequest,
+    memory: MemoryManager = Depends(get_memory_manager)
+):
+    """Adds a new entry (text and metadata) to the semantic memory (vector store)."""
+    logger.info(f"API: Received request to add semantic entry. Text snippet: '{request_data.text[:100]}...' ID: {request_data.id or 'Not provided'}")
+    if not memory.vector_store:
+        logger.warning("API: Vector store not available. Cannot add semantic entry.")
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Vector store unavailable", "detail": "The vector store is not initialized or not accessible."}
+        )
+
+    try:
+        added_id = memory.add_semantic_memory_event(
+            text=request_data.text,
+            metadata=request_data.metadata,
+            event_id=request_data.id # Pass the ID if provided
+        )
+        if added_id:
+            logger.info(f"API: Semantic entry added successfully with ID: {added_id}")
+            return SemanticAddResponse(id=added_id, message="Semantic entry added successfully.")
+        else:
+            # This case might occur if add_semantic_memory_event returns None without raising an exception
+            # e.g. if the vector_store.add_documents itself returned an unexpected result.
+            logger.error("API: Failed to add semantic entry, MemoryManager.add_semantic_memory_event returned None or mismatched ID.")
+            raise HTTPException(
+                status_code=500,
+                detail={"error": "Failed to add semantic entry", "detail": "Internal error occurred while adding to vector store, ID not confirmed."}
+            )
+    except Exception as e: # Catch exceptions from add_semantic_memory_event or underlying vector_store
+        logger.error(f"API: Exception while adding semantic entry: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to add semantic entry", "detail": str(e)}
+        )
+
+@memory_router.post(
+    "/semantic/query",
+    response_model=SemanticQueryResponse, # On success
+    responses={
+        200: {"model": SemanticQueryResponse, "description": "Query successful"},
+        400: {"model": SemanticErrorResponse, "description": "Invalid request (e.g., missing query_text)"},
+        500: {"model": SemanticErrorResponse, "description": "Internal server error during query"},
+        503: {"model": SemanticErrorResponse, "description": "Vector store unavailable"}
+    }
+)
+async def query_semantic_entries(
+    request_data: SemanticQueryRequest,
+    memory: MemoryManager = Depends(get_memory_manager)
+):
+    """Queries the semantic memory for entries similar to the query_text."""
+    logger.info(f"API: Received semantic query. Query text snippet: '{request_data.query_text[:100]}...' Top_k: {request_data.top_k}, Filter: {request_data.metadata_filter}")
+    if not memory.vector_store:
+        logger.warning("API: Vector store not available. Cannot query semantic entries.")
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Vector store unavailable", "detail": "The vector store is not initialized or not accessible."}
+        )
+
+    try:
+        results_from_mm = memory.semantic_search(
+            query_text=request_data.query_text,
+            top_k=request_data.top_k, # Relies on Pydantic default in SemanticQueryRequestSchema
+            metadata_filter=request_data.metadata_filter
+        )
+
+        # MemoryManager.semantic_search now returns a list of dicts, or a list containing an error dict.
+        if results_from_mm and isinstance(results_from_mm, list) and len(results_from_mm) > 0 and "error" in results_from_mm[0]:
+            err_detail = results_from_mm[0].get("detail", results_from_mm[0]["error"])
+            logger.warning(f"API: Semantic search from MemoryManager indicated an error: {err_detail}")
+            # Determine appropriate status code based on error if possible, else 500
+            status_code = 503 if "not available" in err_detail.lower() else 500
+            raise HTTPException(
+                status_code=status_code,
+                detail={"error": "Semantic query failed", "detail": err_detail}
+            )
+
+        # Convert to SemanticQueryResponseItem. This assumes MemoryManager.semantic_search
+        # returns dicts directly compatible with SemanticQueryResponseItem schema.
+        response_items = [SemanticQueryResponseItem(**item) for item in results_from_mm]
+        logger.info(f"API: Semantic query returned {len(response_items)} results.")
+        return SemanticQueryResponse(results=response_items)
+
+    except HTTPException: # Re-raise HTTPExceptions (e.g. from the 503 check above)
+        raise
+    except Exception as e: # Catch other unexpected errors
+        logger.error(f"API: Exception during semantic query: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to query semantic memory", "detail": str(e)}
+        )
+
+# The main router in main.py will need to include this memory_router
+# router.include_router(memory_router) # This should be done in main.py where `app` is defined.
+
+@memory_router.post(
+    "/hybrid/query",
+    response_model=HybridQueryResponseSchema,
+    responses={
+        200: {"model": HybridQueryResponseSchema, "description": "Hybrid query successful"},
+        400: {"model": SemanticErrorResponse, "description": "Invalid request (e.g., missing query_text)"},
+        # 503 could be used if a sub-system like vector store is down, but MemoryManager might handle that.
+        500: {"model": SemanticErrorResponse, "description": "Internal server error during hybrid query"},
+    }
+)
+async def hybrid_memory_query(
+    request_data: HybridQueryRequestSchema,
+    memory: MemoryManager = Depends(get_memory_manager)
+):
+    """
+    Performs a hybrid query, fetching results from semantic search (vector store)
+    and structured data sources (tasks, logs, plans, proposals) based on options.
+    The `query_text` is primarily used for semantic search.
+    """
+    logger.info(f"API: Received hybrid query. Query text snippet: '{request_data.query_text[:100]}...'")
+
+    try:
+        # Convert Pydantic model for structured_options to dict if it exists, else None
+        structured_options_dict = request_data.structured_options.model_dump() if request_data.structured_options else None
+
+        hybrid_results_data = memory.hybrid_query(
+            query_text=request_data.query_text,
+            semantic_top_k=request_data.semantic_top_k,
+            semantic_metadata_filter=request_data.metadata_filter,
+            structured_options=structured_options_dict
+        )
+
+        # The hybrid_query method in MemoryManager already returns a dict matching HybridQueryResponseSchema.
+        # So, we can directly pass it to the Pydantic model for validation and response.
+        logger.info(f"API: Hybrid query returned {len(hybrid_results_data.get('results', []))} combined results.")
+        return HybridQueryResponseSchema(**hybrid_results_data)
+
+    except Exception as e:
+        logger.error(f"API: Exception during hybrid query: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to perform hybrid query", "detail": str(e)}
+        )
+
+# --- End of File ---
 # async def read_items(skip: int = 0, limit: int = 10):
 #     """Retrieve a list of example items."""
 #     return list(fake_items_db.values())[skip : skip + limit]

@@ -143,4 +143,97 @@ class AsyncTaskStatusResponse(BaseModel):
     error: Optional[str] = Field(None, example="ValueError: Division by zero") # Error message if failed
     traceback: Optional[str] = Field(None, description="Full traceback if the task failed.") # For detailed error info
 
+
+# --- Semantic Memory Schemas ---
+class SemanticAddRequest(BaseModel):
+    text: str = Field(..., min_length=1, example="The agent observed a new pattern in the data.")
+    metadata: Dict[str, Any] = Field(default_factory=dict, example={"source": "observation", "timestamp": "2023-11-16T10:00:00Z"})
+    id: Optional[str] = Field(None, example="obs_pattern_001")
+
+class SemanticAddResponse(BaseModel):
+    id: str = Field(..., example="obs_pattern_001")
+    message: str = Field("Semantic entry added successfully.", example="Semantic entry added successfully.")
+
+class SemanticQueryRequest(BaseModel):
+    query_text: str = Field(..., min_length=1, example="patterns in data")
+    top_k: Optional[int] = Field(5, gt=0, example=3)
+    metadata_filter: Optional[Dict[str, Any]] = Field(None, example={"source": "observation"})
+
+class SemanticQueryResponseItem(BaseModel):
+    id: str
+    text: str
+    metadata: Dict[str, Any]
+    distance: Optional[float] = None # ChromaDB includes this
+
+class SemanticQueryResponse(BaseModel):
+    results: List[SemanticQueryResponseItem]
+
+class SemanticErrorResponse(BaseModel): # Can be used if vector store is unavailable
+    error: str
+    detail: Optional[str] = None
+
+
+# --- Hybrid Memory Query Schemas ---
+class HybridQueryStructuredFilterOptionsSchema(BaseModel):
+    include_tasks: bool = Field(False, description="Whether to include tasks in the results.")
+    task_status_filter: Optional[str] = Field(None, example="pending", description="Filter tasks by status.")
+    task_limit: int = Field(5, gt=0, example=3, description="Max number of tasks to return.")
+
+    include_db_logs: bool = Field(False, description="Whether to include DB logs in the results.")
+    db_log_level_filter: Optional[str] = Field(None, example="ERROR", description="Filter DB logs by level.")
+    db_log_limit: int = Field(5, gt=0, example=3, description="Max number of DB logs to return.")
+
+    include_plans: bool = Field(False, description="Whether to include plans in the results.")
+    plan_limit: int = Field(5, gt=0, example=3, description="Max number of plans to return.")
+
+    include_proposals: bool = Field(False, description="Whether to include self-modification proposals.")
+    proposal_limit: int = Field(5, gt=0, example=3, description="Max number of proposals to return.")
+
+class HybridQueryRequestSchema(BaseModel):
+    query_text: str = Field(..., min_length=1, example="recent agent activities and errors")
+    semantic_top_k: int = Field(3, gt=0, example=3)
+    semantic_metadata_filter: Optional[Dict[str, Any]] = Field(None, example={"type": "agent_action"})
+    structured_options: Optional[HybridQueryStructuredFilterOptionsSchema] = Field(None)
+
+class HybridQueryResultItemSchema(BaseModel):
+    source_type: str = Field(..., example="semantic_match / task / db_log / plan / proposal")
+    content: Dict[str, Any] = Field(..., description="The actual data object (e.g., task details, log entry, semantic hit)")
+    # For semantic results, 'distance' is often used. For keyword matches, a score might be different.
+    # Using a generic 'relevance_score' that can be populated as appropriate.
+    # Lower distance = higher relevance for semantic. For keyword, higher score = higher relevance.
+    # This might need normalization if mixed ranking is done. For now, it's just a field.
+    relevance_score: Optional[float] = Field(None, example=0.85, description="A score indicating relevance (e.g., 1.0 - distance for semantic, or keyword match score).")
+    timestamp: Optional[datetime.datetime] = Field(None, description="Timestamp of the original item, if available, for sorting.")
+
+
+class HybridQueryResponseSchema(BaseModel):
+    query_text: str
+    # Results could be a list of a Union of specific response types, or kept generic like this.
+    # Using a generic item schema for simplicity in merging diverse data structures.
+    results: List[HybridQueryResultItemSchema]
+
+
+# --- Self Modification Schemas ---
+class ProposeChangeRequestSchema(BaseModel):
+    files_content: Dict[str, str] = Field(..., example={"src/main.py": "print('Hello, World!')"})
+    commit_message: str = Field(..., min_length=5, example="feat: Implement new greeting feature")
+    branch_prefix: Optional[str] = Field(None, example="feature")
+
+class ProposalResponseSchema(BaseModel):
+    proposal_id: str = Field(..., example="prop_123xyz")
+    branch_name: str = Field(..., example="feature/prop_123xyz_new_greeting")
+    status: str = Field(..., example="proposed")
+    message: Optional[str] = Field(None, example="Proposal submitted and validation pending.")
+
+class ProposalStatusResponseSchema(OrmBaseModel): # Enable ORM mode for reading from MemoryManager
+    proposal_id: str
+    branch_name: str
+    commit_message: str
+    status: str
+    validation_output: Optional[str] = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+    approved_by: Optional[str] = None
+
+
 # Add more Pydantic models as the API evolves.

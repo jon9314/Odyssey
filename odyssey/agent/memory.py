@@ -16,62 +16,71 @@ from typing import List, Dict, Any, Optional
 # from sentence_transformers import SentenceTransformer # Example for embeddings
 # from langfuse import Langfuse # Example
 
+# Import the new vector store components
+from .vector_store import ChromaVectorStore, VectorStoreInterface # Added VectorStoreInterface
+
 logger = logging.getLogger(__name__)
 
 # Default paths (can be overridden by config)
 DEFAULT_DB_PATH = "var/memory/structured_memory.db"
-DEFAULT_VECTOR_STORE_PATH = "var/memory/vector_store" # For ChromaDB or FAISS files
+DEFAULT_VECTOR_STORE_PERSIST_PATH = "var/memory/vector_store_chroma" # Specific for Chroma persistence
+DEFAULT_VECTOR_STORE_COLLECTION = "odyssey_semantic_collection" # Renamed for clarity
 DEFAULT_JSON_BACKUP_PATH = "var/memory/backup/"
+DEFAULT_EMBEDDING_MODEL = 'all-MiniLM-L6-v2' # For Chroma's SentenceTransformer
 
 class MemoryManager:
     def __init__(self,
                  db_path: str = DEFAULT_DB_PATH,
-                 vector_store_path: str = DEFAULT_VECTOR_STORE_PATH,
+                 vector_store_persist_path: str = DEFAULT_VECTOR_STORE_PERSIST_PATH,
+                 vector_store_collection_name: str = DEFAULT_VECTOR_STORE_COLLECTION,
                  json_backup_path: str = DEFAULT_JSON_BACKUP_PATH,
-                 embedding_model_name: str = 'all-MiniLM-L6-v2', # Common default for SentenceTransformer
-                 langfuse_client=None): # Pass initialized Langfuse client
+                 embedding_model_name: str = DEFAULT_EMBEDDING_MODEL,
+                 langfuse_wrapper: Optional[ActualLangfuseClientWrapper] = None): # Updated to langfuse_wrapper
         """
         Initializes the MemoryManager.
         :param db_path: Path to the SQLite database file.
-        :param vector_store_path: Path for vector store data (e.g., ChromaDB directory).
+        :param vector_store_persist_path: Path for ChromaDB persistent storage.
+        :param vector_store_collection_name: Name of the ChromaDB collection.
         :param json_backup_path: Directory for JSON backups.
         :param embedding_model_name: Name of the sentence transformer model for embeddings.
-        :param langfuse_client: Optional initialized Langfuse client for observability.
+        :param langfuse_wrapper: Optional instance of LangfuseClientWrapper for observability.
         """
         self.db_path = db_path
-        self.vector_store_path = vector_store_path
         self.json_backup_path = json_backup_path
 
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        os.makedirs(self.vector_store_path, exist_ok=True)
         os.makedirs(self.json_backup_path, exist_ok=True)
 
         self.conn = sqlite3.connect(self.db_path)
-        self.conn.row_factory = sqlite3.Row # Access columns by name
+        self.conn.row_factory = sqlite3.Row
         self._create_tables()
 
-        # --- Vector Store Initialization (Placeholder) ---
-        # self.embedding_model = SentenceTransformer(embedding_model_name)
-        # self.chroma_client = ChromaClient(path=self.vector_store_path) # Or setup FAISS index
-        # self.vector_collection_name = "events_semantic"
-        # try:
-        #     self.vector_collection = self.chroma_client.get_or_create_collection(name=self.vector_collection_name)
-        # except Exception as e: # Catch specific Chroma/FAISS exceptions
-        #     logger.error(f"Failed to initialize ChromaDB collection '{self.vector_collection_name}': {e}")
-        #     self.vector_collection = None
-        self.embedding_model = None # Placeholder
-        self.vector_collection = None # Placeholder
-        logger.info("Vector store (ChromaDB/FAISS) initialization is currently a placeholder.")
+        # Vector Store Initialization
+        self.vector_store: Optional[VectorStoreInterface] = None
+        try:
+            logger.info(f"Initializing ChromaVectorStore: collection='{vector_store_collection_name}', persist_path='{vector_store_persist_path}', model='{embedding_model_name}'")
+            self.vector_store = ChromaVectorStore(
+                collection_name=vector_store_collection_name,
+                persist_directory=vector_store_persist_path,
+                embedding_model_name=embedding_model_name
+            )
+            logger.info(f"ChromaVectorStore initialized. Collection count: {self.vector_store.get_collection_count()}")
+        except ImportError:
+            logger.warning("ChromaDB/SentenceTransformers not found. Semantic memory unavailable.")
+            self.vector_store = None
+        except Exception as e:
+            logger.error(f"Failed to initialize ChromaVectorStore: {e}", exc_info=True)
+            self.vector_store = None
 
-
-        # --- Langfuse Client ---
-        self.langfuse = langfuse_client
-        if self.langfuse:
-            logger.info("Langfuse client provided and configured.")
+        # Langfuse Client Wrapper
+        self.langfuse_wrapper = langfuse_wrapper # Store the passed wrapper
+        if self.langfuse_wrapper and self.langfuse_wrapper.active:
+            logger.info("Langfuse client wrapper provided and active.")
         else:
-            logger.info("Langfuse client not provided; observability will be limited.")
+            logger.info("Langfuse client wrapper not provided or not active; observability will be limited.")
 
-        logger.info(f"MemoryManager initialized. SQLite DB: {self.db_path}, Vector Store: {self.vector_store_path}, JSON Backup: {self.json_backup_path}")
+        # Updated log message to reflect correct variable for vector store path
+        logger.info(f"MemoryManager initialized. SQLite DB: {self.db_path}, Vector Store Persist Path: {vector_store_persist_path}, JSON Backup: {self.json_backup_path}")
 
     def _create_tables(self):
         """Creates necessary SQLite tables if they don't exist."""
@@ -102,7 +111,20 @@ class MemoryManager:
                     timestamp TEXT NOT NULL
                 )
             """)
-        logger.info("SQLite tables (tasks, plans, logs) checked/created.")
+            # Self Modification Log table
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS self_modification_log (
+                    proposal_id TEXT PRIMARY KEY,
+                    branch_name TEXT NOT NULL,
+                    commit_message TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    validation_output TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    approved_by TEXT
+                )
+            """)
+        logger.info("SQLite tables (tasks, plans, logs, self_modification_log) checked/created.")
 
     # --- Task Management Methods ---
     def add_task(self, description: str) -> Optional[int]:
@@ -115,8 +137,14 @@ class MemoryManager:
                     (description, 'pending', timestamp)
                 )
                 task_id = cursor.lastrowid
-                logger.info(f"Task added with ID: {task_id}, Description: '{description}'")
-                self.log_to_langfuse({"event_type": "add_task", "task_id": task_id, "description": description})
+                desc_snippet = description[:100] + "..." if len(description) > 100 else description
+                logger.info(f"Task added with ID: {task_id}, Description snippet: '{desc_snippet}'")
+                self.log_to_langfuse({
+                    "event_type": "memory_add_task", # More specific event name
+                    "task_id": task_id,
+                    "input": {"description": description, "initial_status": "pending"},
+                    "output": {"task_id": task_id}
+                })
                 return task_id
         except sqlite3.Error as e:
             logger.error(f"SQLite error adding task: {e}")
@@ -151,7 +179,12 @@ class MemoryManager:
                 )
                 if cursor.rowcount > 0:
                     logger.info(f"Task ID {task_id} status updated to '{status}'.")
-                    self.log_to_langfuse({"event_type": "update_task_status", "task_id": task_id, "status": status})
+                    self.log_to_langfuse({
+                        "event_type": "memory_update_task_status",
+                        "task_id": task_id,
+                        "input": {"new_status": status},
+                        "output": {"updated": True}
+                    })
                     return True
                 else:
                     logger.warning(f"Task ID {task_id} not found for status update.")
@@ -172,7 +205,12 @@ class MemoryManager:
                 )
                 plan_id = cursor.lastrowid
                 logger.info(f"Plan added with ID: {plan_id}")
-                self.log_to_langfuse({"event_type": "add_plan", "plan_id": plan_id, "details_preview": details[:100]})
+                self.log_to_langfuse({
+                    "event_type": "memory_add_plan",
+                    "plan_id": plan_id,
+                    "input": {"details_preview": details[:200]}, # Log more preview
+                    "output": {"plan_id": plan_id}
+                })
                 return plan_id
         except sqlite3.Error as e:
             logger.error(f"SQLite error adding plan: {e}")
@@ -211,7 +249,12 @@ class MemoryManager:
                 # Avoid recursive logging if this method itself is logged by the main logger
                 # For this specific DB log, we might not want to log to stdout via logger.info
                 # print(f"DB Log [{level}]: {message} (ID: {log_id})") # Or use a specific DB logger
-                self.log_to_langfuse({"event_type": "agent_log", "level": level, "message": message})
+                self.log_to_langfuse({
+                    "event_type": "memory_db_log_event_written", # Specific name
+                    "log_id": log_id,
+                    "input": {"message": message, "level": level},
+                    "output": {"log_id": log_id}
+                })
                 return log_id
         except sqlite3.Error as e:
             logger.error(f"SQLite error logging event: {e}")
@@ -236,66 +279,170 @@ class MemoryManager:
             logger.error(f"SQLite error getting logs: {e}")
             return []
 
-    # --- Stubs for Future Features ---
-    def semantic_search(self, query: str) -> List[Dict[str, Any]]: # Renamed query_text to query
+    # --- Self Modification Log Methods ---
+    def log_proposal_step(self, proposal_id: str, branch_name: str, commit_message: str,
+                          status: str, validation_output: Optional[str] = None,
+                          approved_by: Optional[str] = None) -> bool:
         """
-        (STUB) Performs semantic search using a vector store.
-        :param query: The text to search for.
-        :return: A list of search result dictionaries (currently empty).
-        """
-        logger.info(f"(STUB) Semantic search called with query: '{query}'")
-        logger.warning("Semantic search is not implemented yet.")
-        # TODO: Implement actual semantic search with ChromaDB/FAISS and SentenceTransformer.
-        # Example structure of a result item:
-        # { "id": "vector_id_xyz", "document": "Text content...", "score": 0.85, "metadata": {...} }
-            return results
-        except sqlite3.Error as e:
-            logger.error(f"SQLite error during query: {e}")
-            return []
-        except json.JSONDecodeError as e:
-            logger.error(f"Error decoding JSON from query results: {e}")
-            return [] # Or handle partially decoded results
+        Logs or updates a step in the self-modification proposal lifecycle.
+        Uses UPSERT to handle new proposals or update existing ones.
 
+        :param proposal_id: Unique identifier for the proposal.
+        :param branch_name: Git branch name associated with the proposal.
+        :param commit_message: Commit message for the proposed change.
+        :param status: Current status of the proposal (e.g., "proposed", "validation_pending").
+        :param validation_output: Output from validation tests (nullable).
+        :param approved_by: Identifier of the user/entity that approved the proposal (nullable).
+        :return: True if the operation was successful, False otherwise.
+        """
+        now_timestamp = datetime.datetime.utcnow().isoformat()
+        try:
+            with self.conn:
+                self.conn.execute("""
+                    INSERT INTO self_modification_log (
+                        proposal_id, branch_name, commit_message, status,
+                        validation_output, created_at, updated_at, approved_by
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(proposal_id) DO UPDATE SET
+                        branch_name = excluded.branch_name,
+                        commit_message = excluded.commit_message,
+                        status = excluded.status,
+                        validation_output = excluded.validation_output,
+                        updated_at = excluded.updated_at,
+                        approved_by = excluded.approved_by
+                """, (proposal_id, branch_name, commit_message, status,
+                      validation_output, now_timestamp, now_timestamp, approved_by))
+            logger.info(f"Proposal step logged for ID '{proposal_id}'. Status: {status}, Updated_at: {now_timestamp}")
+            self.log_to_langfuse({
+                "event_type": "memory_log_proposal_step", # More specific
+                "proposal_id": proposal_id,
+                "input": { # Grouping input parameters for clarity in Langfuse
+                    "branch_name": branch_name,
+                    "commit_message": commit_message,
+                    "status": status,
+                    "validation_output_snippet": validation_output[:100] if validation_output else None,
+                    "approved_by": approved_by
+                },
+                "output": {"updated": True}
+                # "metadata": {"full_validation_output": validation_output } # Could log full output here if needed
+            })
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"SQLite error logging proposal step for ID '{proposal_id}': {e}")
+            return False
+
+    def get_proposal_log(self, proposal_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves the current log/status for a given proposal_id.
+
+        :param proposal_id: The unique identifier of the proposal to retrieve.
+        :return: A dictionary containing the proposal details if found, otherwise None.
+        """
+        try:
+            cursor = self.conn.execute(
+                "SELECT * FROM self_modification_log WHERE proposal_id = ?",
+                (proposal_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                logger.debug(f"Retrieved proposal log for ID '{proposal_id}'.")
+                return dict(row)
+            else:
+                logger.info(f"No proposal log found for ID '{proposal_id}'.")
+                return None
+        except sqlite3.Error as e:
+            logger.error(f"SQLite error retrieving proposal log for ID '{proposal_id}': {e}")
+            return None
+
+    def list_proposals(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Lists all self-modification proposals and their current status, ordered by the last update.
+
+        :param limit: Maximum number of proposals to return.
+        :return: A list of dictionaries, where each dictionary represents a proposal.
+        """
+        try:
+            cursor = self.conn.execute(
+                "SELECT * FROM self_modification_log ORDER BY updated_at DESC LIMIT ?",
+                (limit,)
+            )
+            proposals = [dict(row) for row in cursor.fetchall()]
+            logger.debug(f"Retrieved {len(proposals)} proposals.")
+            return proposals
+        except sqlite3.Error as e:
+            logger.error(f"SQLite error listing proposals: {e}")
+            return []
+
+    # --- Semantic Memory Methods ---
+    def add_semantic_memory_event(self, text: str, metadata: dict, event_id: Optional[str] = None) -> Optional[str]:
+        """
+        Adds a text event and its metadata to the semantic vector store.
+
+        :param text: The text content of the event.
+        :param metadata: A dictionary of metadata associated with the text.
+        :param event_id: Optional unique ID for this event. If None, one will be generated.
+        :return: The ID of the added event, or None if an error occurred or vector store is unavailable.
+        """
+        if not self.vector_store:
+            logger.warning("Vector store not available. Cannot add semantic memory event.")
+            return None
+
+        doc_id = event_id or str(datetime.datetime.utcnow().timestamp()) + "_" + os.urandom(4).hex() # More unique default ID
+        document = {"text": text, "metadata": metadata, "id": doc_id}
+
+        try:
+            added_ids = self.vector_store.add_documents([document])
+            if added_ids and added_ids[0] == doc_id:
+                logger.info(f"Semantic memory event added with ID: {doc_id}. Text snippet: '{text[:100]}...'")
+                self.log_to_langfuse({
+                    "event_type": "memory_add_semantic_event",
+                    "doc_id": doc_id,
+                    "input": {"text_snippet": text[:200], "metadata": metadata, "provided_id": event_id},
+                    "output": {"stored_id": doc_id}
+                })
+                return doc_id
+            else:
+                logger.error(f"Failed to add semantic memory event. ID mismatch or no ID returned. Expected {doc_id}, got {added_ids}")
+                return None
+        except Exception as e:
+            logger.error(f"Error adding semantic memory event (ID: {doc_id}): {e}", exc_info=True)
+            return None
 
     def semantic_search(self, query_text: str, top_k: int = 5, metadata_filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
-        Performs semantic search using the vector store.
+        Performs semantic search using the configured vector store.
+
         :param query_text: The text to search for.
         :param top_k: Number of top results to return.
-        :param metadata_filter: Optional filter for metadata in the vector store (ChromaDB `where` clause).
-        :return: A list of search results, including document, distance, and metadata.
+        :param metadata_filter: Optional filter for metadata (passed to vector store's `where` clause).
+        :return: A list of search result dictionaries, including text, metadata, id, and distance.
+                 Returns an empty list if vector store is unavailable or an error occurs.
         """
-        logger.info(f"Performing semantic search for: '{query_text}', top_k: {top_k}")
-        if not self.vector_collection or not self.embedding_model:
-            logger.warning("Vector store or embedding model not available for semantic search.")
-            return [{"error": "Semantic search not available."}]
+        if not self.vector_store:
+            logger.warning("Vector store not available. Cannot perform semantic search.")
+            return [{"error": "Semantic search not available / Vector store not initialized."}] # Return error structure
 
-        # try:
-        #     query_embedding = self.embedding_model.encode([query_text])[0].tolist()
-        #     results = self.vector_collection.query(
-        #         query_embeddings=[query_embedding],
-        #         n_results=top_k,
-        #         where=metadata_filter # ChromaDB specific filter
-        #         # include=["documents", "distances", "metadatas"] # Default includes these
-        #     )
-        #     # Process results (ChromaDB returns a specific structure)
-        #     # Example:
-        #     # processed_results = []
-        #     # if results and results.get('ids') and results['ids'][0]:
-        #     #     for i in range(len(results['ids'][0])):
-        #     #         processed_results.append({
-        #     #             "id": results['ids'][0][i],
-        #     #             "document": results['documents'][0][i] if results['documents'] else None,
-        #     #             "distance": results['distances'][0][i] if results['distances'] else None,
-        #     #             "metadata": results['metadatas'][0][i] if results['metadatas'] else None,
-        #     #         })
-        #     # return processed_results
-        #     logger.warning("Semantic search logic is a placeholder.")
-        #     return [{"placeholder_result": "semantic search placeholder", "query": query_text}]
-        # except Exception as e:
-        #     logger.error(f"Error during semantic search: {e}")
-        #     return [{"error": str(e)}]
-        return [] # Return empty list for stub
+        logger.info(f"Performing semantic search for: '{query_text[:100]}...', top_k: {top_k}, filter: {metadata_filter}")
+        try:
+            results = self.vector_store.query_similar_documents(
+                query_text=query_text,
+                top_k=top_k,
+                metadata_filter=metadata_filter
+            )
+            self.log_to_langfuse({
+                "event_type": "memory_semantic_search",
+                "input": {"query_text_snippet": query_text[:200], "top_k": top_k, "metadata_filter": metadata_filter},
+                "output": {"num_results": len(results), "first_result_id": results[0]['id'] if results else None}
+            })
+            return results
+        except Exception as e:
+            logger.error(f"Error during semantic search: {e}", exc_info=True)
+            return [{"error": f"Error during semantic search: {str(e)}"}]
+
+
+    # --- Stubs for Future Features --- (semantic_search was here, now implemented above)
+    # The old semantic_search stub needs to be removed or this new one replaces it.
+    # Assuming this new one replaces it.
 
     def backup_json(self) -> None:
         """
@@ -311,14 +458,51 @@ class MemoryManager:
         (STUB) Logs an event to Langfuse for observability.
         :param event: A dictionary representing the event to log.
         """
-        # In a real implementation, this would use the self.langfuse client.
-        # Example: self.langfuse.trace(...) or self.langfuse.event(...)
-        logger.info(f"(STUB) Langfuse log event: {json.dumps(event)}")
-        # TODO: Implement actual Langfuse logging using the self.langfuse client.
-        # Ensure the event structure is compatible with Langfuse's expectations.
-        if self.langfuse:
-            # self.langfuse.event(name=event.get("event_type", "generic_agent_event"), input=event) # Example
-            pass
+        Logs an event to Langfuse if the wrapper is active.
+        This replaces the old stub method.
+
+        :param event_data: A dictionary containing data for the Langfuse event.
+                           Should include 'event_type' as a key for the Langfuse event name.
+                           Other keys will be part of the metadata.
+        :param trace_id: Optional Langfuse Trace object or ID to associate with this event.
+        """
+        if self.langfuse_wrapper and self.langfuse_wrapper.active:
+            event_name = event_data.pop("event_type", "memory_manager_event") # Use event_type or a default
+
+            # Separate input/output if present, rest goes to metadata
+            input_data = event_data.pop("input", None)
+            output_data = event_data.pop("output", None)
+
+            # Remaining event_data items are considered metadata
+            metadata = event_data
+
+            # If a specific trace_id (object or string) isn't passed, this event might not be linked
+            # or the LangfuseClientWrapper might create a default trace for it.
+            # For MemoryManager events, it's often good if they are part of a larger operation's trace.
+            # The caller of MemoryManager methods would ideally pass a parent_trace_obj.
+            # For now, if no trace_id is passed, it will create a new trace per event.
+            # This might be too granular; consider how to manage traces for sequences of memory ops.
+            # For now, let's assume trace_id is None if not explicitly passed by instrumented methods.
+            # This means instrumented methods MUST be updated to create/pass traces.
+            # Let's simplify: MemoryManager's internal methods will create their own trace if one isn't implicitly available.
+            # The LangfuseClientWrapper's log_event can handle creating a default trace.
+
+            # For now, the instrumented methods will just call this with event_data.
+            # The trace management (creating a top-level trace for an operation and passing it down)
+            # should ideally happen at a higher level (e.g., in API handlers or Celery tasks).
+            # If MemoryManager methods are called without a parent trace, they will create their own.
+
+            # Let's adjust the wrapper's log_event to take trace_id, and here we might not always have one.
+            # The wrapper will handle creating a trace if trace_id is None.
+            self.langfuse_wrapper.log_event(
+                trace_id=None, # Let wrapper create a trace if no parent context
+                name=event_name,
+                input=input_data,
+                output=output_data,
+                metadata=metadata
+            )
+        # else:
+            # logger.debug(f"Langfuse not active. Event not logged: {event_name}")
 
 
     def close(self):
@@ -350,7 +534,8 @@ if __name__ == '__main__':
     # Using 'var/test_memory/' which should be gitignored if var/ is.
     test_base_dir = "var/test_memory"
     example_db_path = os.path.join(test_base_dir, "example_memory.db")
-    example_vector_path = os.path.join(test_base_dir, "example_vector_store")
+    # example_vector_path is now example_vector_persist_path
+    example_vector_persist_path = os.path.join(test_base_dir, "example_vector_store_chroma") # Updated path
     example_backup_path = os.path.join(test_base_dir, "example_json_backups")
 
     # Clean up previous example run files if they exist
@@ -363,9 +548,11 @@ if __name__ == '__main__':
     mock_lf_client = MockLangfuse()
     memory = MemoryManager(
         db_path=example_db_path,
-        vector_store_path=example_vector_path,
+        vector_store_persist_path=example_vector_persist_path, # Updated parameter name
+        # vector_store_collection_name can use default
         json_backup_path=example_backup_path,
-        langfuse_client=mock_lf_client # Pass the mock client
+        # embedding_model_name can use default
+        langfuse_client=mock_lf_client
     )
 
     print("\n--- Task Management ---")
@@ -411,12 +598,43 @@ if __name__ == '__main__':
     for log_entry in error_logs:
         print(f"  ID: {log_entry['id']}, Msg: {log_entry['message']}")
 
+    print("\n--- Semantic Memory ---")
+    if memory.vector_store: # Check if vector_store was initialized
+        event1_id = memory.add_semantic_memory_event(
+            text="The agent successfully completed task #42 regarding data processing.",
+            metadata={"type": "agent_action", "task_id": "42", "status": "success"}
+        )
+        memory.add_semantic_memory_event(
+            text="A critical error occurred in the billing module during an update.",
+            metadata={"type": "system_error", "module": "billing", "severity": "critical"},
+            event_id="error_billing_001" # Provide custom ID
+        )
+        memory.add_semantic_memory_event(
+            text="User 'john_doe' initiated a new project planning session.",
+            metadata={"type": "user_activity", "user": "john_doe", "activity": "planning"}
+        )
 
-    print("\n--- Semantic Search (STUB) ---")
-    semantic_results = memory.semantic_search("Find information about recent errors.")
-    print("Semantic search results:")
-    for res in semantic_results:
-        print(f"  {res}")
+        print(f"Current semantic memory count: {memory.vector_store.get_collection_count()}")
+
+        search_query = "information about data processing tasks"
+        print(f"\nSemantic search for: '{search_query}'")
+        semantic_results = memory.semantic_search(search_query, top_k=2)
+        if semantic_results and "error" not in semantic_results[0]:
+            for res in semantic_results:
+                print(f"  ID: {res.get('id')}, Dist: {res.get('distance', -1):.4f}, Text: '{res.get('text', '')[:60]}...', Meta: {res.get('metadata')}")
+        else:
+            print(f"  Semantic search returned: {semantic_results}")
+
+        search_query_filtered = "billing problems"
+        print(f"\nSemantic search for: '{search_query_filtered}' with filter {{'severity': 'critical'}}")
+        semantic_results_filtered = memory.semantic_search(search_query_filtered, top_k=1, metadata_filter={"severity": "critical"})
+        if semantic_results_filtered and "error" not in semantic_results_filtered[0]:
+            for res in semantic_results_filtered:
+                print(f"  ID: {res.get('id')}, Dist: {res.get('distance', -1):.4f}, Text: '{res.get('text', '')[:60]}...', Meta: {res.get('metadata')}")
+        else:
+            print(f"  Semantic search returned: {semantic_results_filtered}")
+    else:
+        print("  Vector store (ChromaDB) not available, skipping semantic memory example.")
 
 
     print("\n--- JSON Backup ---")
@@ -439,6 +657,108 @@ if __name__ == '__main__':
 
     # Optional: Clean up example files after run
     # if os.path.exists(example_db_path): os.remove(example_db_path)
-    # if os.path.exists(example_vector_path): shutil.rmtree(example_vector_path)
+    # if os.path.exists(example_vector_path): shutil.rmtree(example_vector_path) # Should be example_vector_persist_path
     # if os.path.exists(example_backup_path): shutil.rmtree(example_backup_path)
     # print("Cleaned up example files.")
+
+    def hybrid_query(self,
+                     query_text: str,
+                     semantic_top_k: int = 3,
+                     semantic_metadata_filter: Optional[Dict[str, Any]] = None,
+                     structured_options: Optional[Dict[str, Any]] = None
+                     ) -> Dict[str, Any]:
+        """
+        Performs a hybrid query, fetching results from both semantic search and structured data sources.
+
+        :param query_text: The primary query text, mainly for semantic search.
+        :param semantic_top_k: Number of results to fetch from semantic search.
+        :param semantic_metadata_filter: Metadata filter for semantic search.
+        :param structured_options: Dictionary of options for fetching structured data.
+            Expected keys (matching HybridQueryStructuredFilterOptionsSchema):
+            'include_tasks': bool, 'task_status_filter': Optional[str], 'task_limit': int,
+            'include_db_logs': bool, 'db_log_level_filter': Optional[str], 'db_log_limit': int,
+            'include_plans': bool, 'plan_limit': int,
+            'include_proposals': bool, 'proposal_limit': int
+        :return: A dictionary structured like HybridQueryResponseSchema.
+        """
+        all_results = []
+        structured_options = structured_options or {}
+
+        # 1. Semantic Search
+        if query_text and semantic_top_k > 0:
+            logger.info(f"Hybrid query: Performing semantic search for '{query_text[:100]}...' (top_k={semantic_top_k})")
+            semantic_hits = self.semantic_search(
+                query_text=query_text,
+                top_k=semantic_top_k,
+                metadata_filter=semantic_metadata_filter
+            )
+            for hit in semantic_hits:
+                if "error" in hit: # Skip error objects from semantic_search
+                    logger.warning(f"Hybrid query: Semantic search returned an error object: {hit}")
+                    continue
+                all_results.append({
+                    "source_type": "semantic_match",
+                    "content": hit, # The entire hit (id, text, metadata, distance) is content
+                    "relevance_score": 1.0 - hit.get("distance", 1.0) if hit.get("distance") is not None else 0.0, # Convert distance to score
+                    "timestamp": datetime.datetime.fromisoformat(hit.get("metadata", {}).get("timestamp")) if hit.get("metadata", {}).get("timestamp") else None
+                })
+
+        # 2. Structured Data Fetching
+        logger.info(f"Hybrid query: Processing structured options: {structured_options}")
+        if structured_options.get('include_tasks', False):
+            tasks = self.get_tasks(
+                status_filter=structured_options.get('task_status_filter'),
+                limit=structured_options.get('task_limit', 5)
+            )
+            for task in tasks:
+                all_results.append({
+                    "source_type": "task",
+                    "content": task,
+                    "relevance_score": None, # No direct relevance score from this source yet
+                    "timestamp": datetime.datetime.fromisoformat(task.get("timestamp")) if task.get("timestamp") else None
+                })
+
+        if structured_options.get('include_db_logs', False):
+            db_logs = self.get_logs(
+                level_filter=structured_options.get('db_log_level_filter'),
+                limit=structured_options.get('db_log_limit', 5)
+            )
+            for log_entry in db_logs:
+                all_results.append({
+                    "source_type": "db_log",
+                    "content": log_entry,
+                    "relevance_score": None,
+                    "timestamp": datetime.datetime.fromisoformat(log_entry.get("timestamp")) if log_entry.get("timestamp") else None
+                })
+
+        if structured_options.get('include_plans', False):
+            plans = self.get_plans(limit=structured_options.get('plan_limit', 5))
+            for plan in plans:
+                all_results.append({
+                    "source_type": "plan",
+                    "content": plan,
+                    "relevance_score": None,
+                    "timestamp": datetime.datetime.fromisoformat(plan.get("timestamp")) if plan.get("timestamp") else None
+                })
+
+        if structured_options.get('include_proposals', False):
+            proposals = self.list_proposals(limit=structured_options.get('proposal_limit', 5))
+            for proposal in proposals:
+                all_results.append({
+                    "source_type": "proposal", # self_modification_log
+                    "content": proposal,
+                    "relevance_score": None,
+                     # Use 'updated_at' as primary timestamp, fallback to 'created_at'
+                    "timestamp": datetime.datetime.fromisoformat(proposal.get("updated_at")) if proposal.get("updated_at") else (datetime.datetime.fromisoformat(proposal.get("created_at")) if proposal.get("created_at") else None)
+                })
+
+        # Simple concatenation for now. Future: sort by timestamp or relevance_score if normalized.
+        # Sort by timestamp descending (most recent first), if available
+        try:
+            all_results.sort(key=lambda x: x.get("timestamp") or datetime.datetime.min, reverse=True)
+        except TypeError as te:
+            logger.warning(f"Hybrid query: Could not sort results by timestamp due to type error (possibly None mixed with datetime without proper handling for all items): {te}")
+            # Proceed with unsorted or partially sorted results if timestamps are inconsistent
+
+        logger.info(f"Hybrid query: Returning {len(all_results)} combined results.")
+        return {"query_text": query_text, "results": all_results}

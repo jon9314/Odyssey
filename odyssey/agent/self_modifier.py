@@ -27,7 +27,12 @@ class SelfModifier:
 
     def _is_git_repo(self) -> bool:
         """Checks if the repo_path is a valid Git repository."""
-        return os.path.isdir(os.path.join(self.repo_path, ".git"))
+        git_dir = os.path.join(self.repo_path, ".git")
+        is_repo = os.path.isdir(git_dir)
+        if not is_repo:
+            logger.debug(f"Path '{self.repo_path}' .git directory check failed. Not a Git repository.")
+        return is_repo
+        # return os.path.isdir(os.path.join(self.repo_path, ".git")) # Duplicate line removed
 
     def _run_git_command(self, command: list, raise_on_error=True) -> tuple[str, str, int]:
         """Helper to run Git commands."""
@@ -57,79 +62,196 @@ class SelfModifier:
                 raise
             return "", str(e), -2
 
+    def checkout_branch(self, branch_name: str, create_if_not_exists: bool = False, base_branch: Optional[str] = None) -> bool:
+        """
+        Checks out the specified branch. Can optionally create it if it doesn't exist.
+        :param branch_name: The name of the branch to checkout or create.
+        :param create_if_not_exists: If True, creates the branch using `git checkout -b`.
+        :param base_branch: If creating, the branch to base the new branch off. Defaults to current HEAD.
+        :return: True if successful, False otherwise.
+        """
+        logger.info(f"Attempting to checkout branch: {branch_name}")
+        if not self._is_git_repo():
+            logger.error(f"Cannot checkout branch '{branch_name}', path '{self.repo_path}' is not a Git repository.")
+            return False
 
-    def propose_change(self, files: dict[str, str], message: str, branch_name: str = None) -> str:
+        command = ["checkout", branch_name]
+        if create_if_not_exists:
+            command = ["checkout", "-b", branch_name]
+            if base_branch:
+                command.append(base_branch)
+
+        stdout, stderr, ret_code = self._run_git_command(command, raise_on_error=False)
+        if ret_code == 0:
+            logger.info(f"Successfully checked out branch '{branch_name}'. Output: {stdout}")
+            return True
+        else:
+            # If creation was intended and it failed, or if checkout of existing branch failed
+            logger.error(f"Failed to checkout branch '{branch_name}'. Stderr: {stderr}, Stdout: {stdout}")
+            # Common case: branch already exists if tried with -b
+            if create_if_not_exists and ("already exists" in stderr or "already on" in stdout) :
+                 logger.info(f"Branch '{branch_name}' already exists or already on it. Attempting regular checkout.")
+                 return self.checkout_branch(branch_name, create_if_not_exists=False) # Try simple checkout
+            return False
+
+    def propose_code_changes(self, files_content: dict[str, str], commit_message: str, branch_name: str = None, branch_prefix: Optional[str] = None, proposal_id: Optional[str] = None) -> str:
         """
         Applies file changes, commits them to a new branch, and pushes the branch.
-        :param files: A dictionary where keys are file paths (relative to repo_path)
-                      and values are the new content for these files.
-        :param message: The commit message.
-        :param branch_name: Optional name for the new branch. If None, a default name is generated.
-        :return: The name of the branch created and pushed, or an error message.
+        This is an updated version of propose_change.
+        :param files_content: A dictionary where keys are file paths (relative to repo_path)
+                              and values are the new content for these files.
+        :param commit_message: The commit message.
+        :param branch_name: Specific name for the new branch. If None, generated using prefix and proposal_id.
+        :param branch_prefix: Optional prefix for the new branch name (e.g., "feature", "fix").
+        :param proposal_id: Optional unique ID to include in the generated branch name for traceability.
+        :return: The name of the branch created and pushed.
+        :raises: Exception if critical Git operations fail (e.g., creating branch, committing).
         """
-        logger.info(f"Proposing changes with message: '{message}'")
+        logger.info(f"Proposing code changes with commit message: '{commit_message}'")
 
         if not self._is_git_repo():
-            return "Error: Current path is not a Git repository."
+            raise Exception("Error: Current path is not a Git repository.")
 
-        # 1. Get current branch
-        current_branch, _, ret_code = self._run_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
+        current_branch_stdout, _, ret_code = self._run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], raise_on_error=False)
         if ret_code != 0:
-            return f"Error getting current branch: {current_branch}"
+            raise Exception(f"Error getting current branch: {current_branch_stdout}")
+        current_branch = current_branch_stdout.strip()
+        logger.info(f"Current branch is '{current_branch}'.")
 
-        # 2. Create a new branch
         if not branch_name:
-            branch_name = f"self-modify/{message.lower().replace(' ', '-')[:20]}-{os.urandom(3).hex()}"
+            prefix = branch_prefix or "proposal"
+            unique_suffix = proposal_id or os.urandom(4).hex()
+            sanitized_commit_msg_part = commit_message.lower().replace(' ', '-').replace('/', '-').replace('\\', '-')
+            sanitized_commit_msg_part = "".join(c for c in sanitized_commit_msg_part if c.isalnum() or c == '-')[:30]
+            branch_name = f"{prefix}/{unique_suffix}_{sanitized_commit_msg_part}"
 
-        logger.info(f"Creating new branch: {branch_name} from {current_branch}")
-        _, stderr, ret_code = self._run_git_command(["checkout", "-b", branch_name, current_branch])
-        if ret_code != 0:
-            # Attempt to switch to it if it already exists (e.g. from a previous failed attempt)
-            _, stderr_checkout, ret_code_checkout = self._run_git_command(["checkout", branch_name])
-            if ret_code_checkout != 0:
-                return f"Error creating or switching to branch '{branch_name}': {stderr or stderr_checkout}"
-            logger.info(f"Switched to existing branch: {branch_name}")
+        logger.info(f"Target branch for changes: {branch_name}")
 
+        # Create or switch to the target branch
+        if not self.checkout_branch(branch_name, create_if_not_exists=True, base_branch=current_branch):
+             # If creation with -b failed but branch might exist from previous run, try simple checkout
+            if not self.checkout_branch(branch_name, create_if_not_exists=False):
+                raise Exception(f"Error creating or switching to branch '{branch_name}'.")
+        logger.info(f"Successfully on branch '{branch_name}'.")
 
         # 3. Apply file changes
         logger.info(f"Applying file changes to branch '{branch_name}'")
-        for file_path, content in files.items():
+        for file_path, new_content in files_content.items(): # Iterate over files_content
             full_path = os.path.join(self.repo_path, file_path)
             try:
                 os.makedirs(os.path.dirname(full_path), exist_ok=True)
                 with open(full_path, 'w') as f:
-                    f.write(content)
+                    f.write(new_content) # Use new_content
                 logger.debug(f"Wrote changes to {file_path}")
                 self._run_git_command(["add", file_path]) # Stage the file
             except Exception as e:
                 logger.error(f"Error writing or staging file {file_path}: {e}")
                 # Attempt to switch back to original branch on error
-                self._run_git_command(["checkout", current_branch], raise_on_error=False)
-                return f"Error processing file {file_path}: {e}"
+                self.checkout_branch(current_branch) # Use the new checkout method
+                raise Exception(f"Error processing file {file_path}: {e}")
 
         # 4. Commit changes
-        logger.info(f"Committing changes with message: '{message}'")
-        _, stderr, ret_code = self._run_git_command(["commit", "-m", message])
+        logger.info(f"Committing changes with message: '{commit_message}'")
+        _, stderr, ret_code = self._run_git_command(["commit", "-m", commit_message])
         if ret_code != 0:
             # Attempt to switch back to original branch on error
-            self._run_git_command(["checkout", current_branch], raise_on_error=False)
-            return f"Error committing changes: {stderr}. No changes to commit or other git error."
+            self.checkout_branch(current_branch)
+            # Check if the error is "nothing to commit"
+            if "nothing to commit" in stderr or "no changes added to commit" in stderr:
+                logger.warning(f"No changes to commit for branch '{branch_name}'. This might be ok if files were identical or already committed.")
+                # If branch is empty (no new commit), decide if this is an error or acceptable.
+                # For now, let's assume it's acceptable and proceed as if committed.
+            else:
+                raise Exception(f"Error committing changes: {stderr}. No changes to commit or other git error.")
 
         # 5. Push the new branch to remote (e.g., origin)
-        # This step requires authentication if the repo is private or pushing to protected branches.
-        # For now, assumes 'origin' is the remote.
         logger.info(f"Pushing branch '{branch_name}' to remote 'origin'")
-        _, stderr, ret_code = self._run_git_command(["push", "-u", "origin", branch_name])
+        _, stderr, ret_code = self._run_git_command(["push", "-u", "origin", branch_name, "--force-with-lease"]) # Added --force-with-lease for safety on re-runs
         if ret_code != 0:
-            # Don't switch back here, commit is made, but push failed. User might fix manually.
             logger.error(f"Error pushing branch '{branch_name}': {stderr}")
-            return f"Changes committed to local branch '{branch_name}', but push failed: {stderr}"
+            # Don't switch back here, commit is made, but push failed. User might fix manually or retry.
+            raise Exception(f"Changes committed to local branch '{branch_name}', but push failed: {stderr}")
 
         # 6. Switch back to the original branch (optional, good practice)
-        self._run_git_command(["checkout", current_branch], raise_on_error=False)
+        self.checkout_branch(current_branch)
 
-        logger.info(f"Successfully proposed changes on branch: {branch_name}")
+        logger.info(f"Successfully proposed code changes on branch: {branch_name}")
         return branch_name
+
+    def merge_branch(self, branch_to_merge: str, target_branch: str = "main", delete_branch_after_merge: bool = True) -> tuple[bool, str]:
+        """
+        Merges a specified branch into a target branch (e.g., main) and optionally deletes the merged branch.
+        :param branch_to_merge: The name of the branch to merge.
+        :param target_branch: The branch to merge into (default: "main").
+        :param delete_branch_after_merge: Whether to delete the local and remote merged branch (default: True).
+        :return: Tuple (success: bool, message: str)
+        """
+        logger.info(f"Attempting to merge branch '{branch_to_merge}' into '{target_branch}'.")
+        if not self._is_git_repo():
+            return False, "Not a Git repository."
+
+        original_branch_stdout, _, ret_code = self._run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], raise_on_error=False)
+        if ret_code != 0:
+            return False, f"Could not get current branch: {original_branch_stdout}"
+        current_branch = original_branch_stdout.strip()
+
+        try:
+            # 1. Checkout the target branch
+            if not self.checkout_branch(target_branch):
+                return False, f"Failed to checkout target branch '{target_branch}'."
+
+            # 2. Pull latest changes on the target branch
+            logger.info(f"Pulling latest changes for target branch '{target_branch}'.")
+            _, stderr_pull, ret_code_pull = self._run_git_command(["pull", "origin", target_branch], raise_on_error=False)
+            if ret_code_pull != 0:
+                logger.warning(f"Failed to pull latest changes for '{target_branch}': {stderr_pull}. Merge might use stale version.")
+                # Depending on policy, this could be a hard failure.
+
+            # 3. Merge the feature branch
+            logger.info(f"Merging '{branch_to_merge}' into '{target_branch}'.")
+            # Using --no-ff to create a merge commit, good for history. Can be changed.
+            _, stderr_merge, ret_code_merge = self._run_git_command(["merge", "--no-ff", branch_to_merge], raise_on_error=False)
+            if ret_code_merge != 0:
+                # Attempt to abort merge on conflict
+                self._run_git_command(["merge", "--abort"], raise_on_error=False)
+                logger.error(f"Failed to merge '{branch_to_merge}' into '{target_branch}': {stderr_merge}")
+                return False, f"Merge conflict or other error merging '{branch_to_merge}'. Details: {stderr_merge}"
+
+            # 4. Push the target branch with merged changes
+            logger.info(f"Pushing merged '{target_branch}' to origin.")
+            _, stderr_push, ret_code_push = self._run_git_command(["push", "origin", target_branch], raise_on_error=False)
+            if ret_code_push != 0:
+                logger.error(f"Failed to push merged '{target_branch}': {stderr_push}")
+                # This is a problem: merge is local but not remote.
+                return False, f"Local merge successful, but failed to push '{target_branch}': {stderr_push}"
+
+            logger.info(f"Successfully merged '{branch_to_merge}' into '{target_branch}' and pushed.")
+
+            # 5. Optionally delete the merged branch (local and remote)
+            if delete_branch_after_merge:
+                logger.info(f"Deleting branch '{branch_to_merge}' locally and remotely.")
+                _, stderr_delete_local, ret_code_delete_local = self._run_git_command(["branch", "-d", branch_to_merge], raise_on_error=False)
+                if ret_code_delete_local == 0:
+                    logger.info(f"Deleted local branch '{branch_to_merge}'.")
+                else:
+                    logger.warning(f"Could not delete local branch '{branch_to_merge}': {stderr_delete_local}")
+
+                _, stderr_delete_remote, ret_code_delete_remote = self._run_git_command(["push", "origin", "--delete", branch_to_merge], raise_on_error=False)
+                if ret_code_delete_remote == 0:
+                    logger.info(f"Deleted remote branch '{branch_to_merge}'.")
+                else:
+                    # This is not critical if local delete worked and merge is pushed
+                    logger.warning(f"Could not delete remote branch '{branch_to_merge}': {stderr_delete_remote}")
+
+            return True, f"Successfully merged '{branch_to_merge}' into '{target_branch}'."
+
+        except Exception as e:
+            logger.error(f"Exception during merge_branch operation: {e}", exc_info=True)
+            return False, f"An unexpected error occurred during merge: {str(e)}"
+        finally:
+            # Switch back to the branch active before this operation started
+            self.checkout_branch(current_branch)
+
 
     def open_pr(self, branch: str, title: str = None, body: str = None, base_branch: str = "main") -> str:
         """
@@ -186,73 +308,45 @@ class SelfModifier:
         # TODO: Implement GitHub API call using self.github_token
         return f"Error: PR opening via API not yet implemented. Please open PR for branch '{branch}' manually."
 
-
-    def sandbox_test(self, branch: str) -> bool:
+    # Updated method signature and logic
+    def sandbox_test(self, repo_clone_path: str, proposal_id: str) -> tuple[bool, str]:
         """
-        Checks out the specified branch and runs tests in a sandbox.
-        :param branch: The branch to test.
-        :return: True if tests pass, False otherwise.
+        Runs validation tests for the code in the specified repository clone path using Docker.
+        This method assumes the correct branch is already checked out in repo_clone_path.
+        :param repo_clone_path: The absolute path to the cloned repository where the proposal branch is checked out.
+        :param proposal_id: The ID of the proposal, used for naming Docker images/containers.
+        :return: Tuple (success: bool, output_log: str)
         """
-        logger.info(f"Starting sandbox test for branch: {branch}")
+        logger.info(f"Starting sandbox Docker validation for proposal '{proposal_id}' in path: {repo_clone_path}")
         if not self.sandbox_manager:
-            logger.error("Sandbox manager not provided. Cannot run sandbox tests.")
-            return False
+            msg = "Sandbox manager not provided to SelfModifier. Cannot run sandbox tests."
+            logger.error(msg)
+            return False, msg
 
-        original_branch, _, ret_code = self._run_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
-        if ret_code != 0:
-            logger.error(f"Could not get current branch: {original_branch}")
-            return False
+        # Ensure sandbox_manager has the new method.
+        if not hasattr(self.sandbox_manager, 'run_validation_in_docker'):
+            msg = "Sandbox manager does not support 'run_validation_in_docker'. Update sandbox or SelfModifier initialization."
+            logger.error(msg)
+            return False, msg
 
         try:
-            # Fetch latest changes and checkout the branch
-            self._run_git_command(["fetch", "origin", branch])
-            _, stderr, ret_code = self._run_git_command(["checkout", branch])
-            if ret_code != 0:
-                logger.error(f"Could not checkout branch '{branch}': {stderr}")
-                return False
+            # The repo_clone_path is already the specific directory with the checked-out branch.
+            # No need for SelfModifier to do further git operations here for testing.
+            # It directly calls the sandbox_manager's Docker validation method.
+            success, output_log = self.sandbox_manager.run_validation_in_docker(repo_clone_path, proposal_id)
 
-            # Pull latest changes for the branch
-            _, stderr, ret_code = self._run_git_command(["pull", "origin", branch])
-            if ret_code != 0:
-                logger.warning(f"Could not pull latest changes for branch '{branch}': {stderr}. Proceeding with local version.")
-
-            # TODO: Define what "tests" mean. This could be:
-            # 1. Running a specific test script (e.g., scripts/test_runner.py)
-            # 2. Checking if the application starts
-            # 3. Linting, type checking, etc.
-            # For now, assume sandbox_manager has a method like `run_validation_script`
-            # and it knows where the project root is or can be told.
-            # The sandbox_manager.test_code() expects a script path.
-
-            # Example: Using a predefined test script from the `scripts` directory
-            test_script_path = os.path.join(self.repo_path, "scripts", "test_runner.py") # Adjust if needed
-            if not os.path.exists(test_script_path):
-                logger.error(f"Test script not found at {test_script_path}")
-                return False
-
-            logger.info(f"Running test script '{test_script_path}' in sandbox for branch '{branch}'.")
-            # The sandbox's test_code method needs to be robust.
-            # It should ideally operate on a copy of the checked-out branch, not the live repo_path.
-            # For this skeleton, we assume it runs on the current state of repo_path.
-            result_output = self.sandbox_manager.test_code(test_script_path)
-            logger.debug(f"Sandbox test output:\n{result_output}")
-
-            # Parse result_output to determine pass/fail
-            # This is highly dependent on the output format of your test_runner.py
-            if "Tests passed" in result_output and "Tests failed" not in result_output and "Error" not in result_output: # Basic check
-                logger.info(f"Sandbox tests passed for branch '{branch}'.")
-                return True
+            if success:
+                logger.info(f"Sandbox Docker validation PASSED for proposal '{proposal_id}'.")
             else:
-                logger.warning(f"Sandbox tests failed for branch '{branch}'. Output:\n{result_output}")
-                return False
+                logger.warning(f"Sandbox Docker validation FAILED for proposal '{proposal_id}'.")
+
+            logger.debug(f"Sandbox validation output for proposal '{proposal_id}':\n{output_log}")
+            return success, output_log
 
         except Exception as e:
-            logger.error(f"Exception during sandbox test for branch '{branch}': {e}")
-            return False
-        finally:
-            # Always switch back to the original branch
-            self._run_git_command(["checkout", original_branch], raise_on_error=False)
-            logger.info(f"Switched back to original branch: {original_branch}")
+            error_msg = f"Exception during sandbox_test for proposal '{proposal_id}': {e}"
+            logger.error(error_msg, exc_info=True)
+            return False, error_msg
 
 
     def merge_pr(self, pr_id: str, merge_method: str = "merge") -> bool: # Changed return to bool
