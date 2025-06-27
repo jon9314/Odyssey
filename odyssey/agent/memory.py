@@ -121,7 +121,10 @@ class MemoryManager:
                     validation_output TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    approved_by TEXT
+                    approved_by TEXT,
+                    pr_url TEXT,
+                    pr_id TEXT,
+                    pr_status TEXT
                 )
             """)
         logger.info("SQLite tables (tasks, plans, logs, self_modification_log) checked/created.")
@@ -282,7 +285,9 @@ class MemoryManager:
     # --- Self Modification Log Methods ---
     def log_proposal_step(self, proposal_id: str, branch_name: str, commit_message: str,
                           status: str, validation_output: Optional[str] = None,
-                          approved_by: Optional[str] = None) -> bool:
+                          approved_by: Optional[str] = None,
+                          pr_url: Optional[str] = None, pr_id: Optional[str] = None, # Changed from pr_number to pr_id to match schema type
+                          pr_status: Optional[str] = None) -> bool:
         """
         Logs or updates a step in the self-modification proposal lifecycle.
         Uses UPSERT to handle new proposals or update existing ones.
@@ -290,45 +295,69 @@ class MemoryManager:
         :param proposal_id: Unique identifier for the proposal.
         :param branch_name: Git branch name associated with the proposal.
         :param commit_message: Commit message for the proposed change.
-        :param status: Current status of the proposal (e.g., "proposed", "validation_pending").
+        :param status: Current status of the proposal (e.g., "proposed", "validation_pending", "pr_open").
         :param validation_output: Output from validation tests (nullable).
         :param approved_by: Identifier of the user/entity that approved the proposal (nullable).
+        :param pr_url: URL of the pull request (nullable).
+        :param pr_id: ID or number of the pull request (nullable).
+        :param pr_status: Status of the pull request (e.g., "open", "merged", "closed") (nullable).
         :return: True if the operation was successful, False otherwise.
         """
         now_timestamp = datetime.datetime.utcnow().isoformat()
         try:
             with self.conn:
-                self.conn.execute("""
-                    INSERT INTO self_modification_log (
-                        proposal_id, branch_name, commit_message, status,
-                        validation_output, created_at, updated_at, approved_by
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(proposal_id) DO UPDATE SET
-                        branch_name = excluded.branch_name,
-                        commit_message = excluded.commit_message,
-                        status = excluded.status,
-                        validation_output = excluded.validation_output,
-                        updated_at = excluded.updated_at,
-                        approved_by = excluded.approved_by
-                """, (proposal_id, branch_name, commit_message, status,
-                      validation_output, now_timestamp, now_timestamp, approved_by))
-            logger.info(f"Proposal step logged for ID '{proposal_id}'. Status: {status}, Updated_at: {now_timestamp}")
+                # Check if record exists to decide if created_at needs to be set
+                cursor = self.conn.execute("SELECT proposal_id FROM self_modification_log WHERE proposal_id = ?", (proposal_id,))
+                exists = cursor.fetchone()
+
+                if exists:
+                    # Update existing record
+                    self.conn.execute("""
+                        UPDATE self_modification_log SET
+                            branch_name = ?, commit_message = ?, status = ?,
+                            validation_output = ?, updated_at = ?, approved_by = ?,
+                            pr_url = COALESCE(?, pr_url),
+                            pr_id = COALESCE(?, pr_id),
+                            pr_status = COALESCE(?, pr_status)
+                        WHERE proposal_id = ?
+                    """, (branch_name, commit_message, status, validation_output,
+                          now_timestamp, approved_by, pr_url, pr_id, pr_status, proposal_id))
+                else:
+                    # Insert new record
+                    self.conn.execute("""
+                        INSERT INTO self_modification_log (
+                            proposal_id, branch_name, commit_message, status,
+                            validation_output, created_at, updated_at, approved_by,
+                            pr_url, pr_id, pr_status
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (proposal_id, branch_name, commit_message, status,
+                          validation_output, now_timestamp, now_timestamp, approved_by,
+                          pr_url, pr_id, pr_status))
+
+            logger.info(f"Proposal step logged for ID '{proposal_id}'. Status: {status}, PR Status: {pr_status}, Updated_at: {now_timestamp}")
+
+            langfuse_input = {
+                "branch_name": branch_name,
+                "commit_message": commit_message,
+                "status": status,
+                "validation_output_snippet": validation_output[:100] if validation_output else None,
+                "approved_by": approved_by,
+                "pr_url": pr_url,
+                "pr_id": pr_id,
+                "pr_status": pr_status
+            }
+            # Remove None values from langfuse_input to keep logs clean
+            langfuse_input_cleaned = {k: v for k, v in langfuse_input.items() if v is not None}
+
             self.log_to_langfuse({
-                "event_type": "memory_log_proposal_step", # More specific
+                "event_type": "memory_log_proposal_step",
                 "proposal_id": proposal_id,
-                "input": { # Grouping input parameters for clarity in Langfuse
-                    "branch_name": branch_name,
-                    "commit_message": commit_message,
-                    "status": status,
-                    "validation_output_snippet": validation_output[:100] if validation_output else None,
-                    "approved_by": approved_by
-                },
+                "input": langfuse_input_cleaned,
                 "output": {"updated": True}
-                # "metadata": {"full_validation_output": validation_output } # Could log full output here if needed
             })
             return True
         except sqlite3.Error as e:
-            logger.error(f"SQLite error logging proposal step for ID '{proposal_id}': {e}")
+            logger.error(f"SQLite error logging proposal step for ID '{proposal_id}': {e}", exc_info=True)
             return False
 
     def get_proposal_log(self, proposal_id: str) -> Optional[Dict[str, Any]]:

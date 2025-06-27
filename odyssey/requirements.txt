@@ -22,6 +22,7 @@ celery[redis] # Includes redis dependency for broker/backend with Valkey (Redis 
 chromadb # As per docker-compose.yml and MemoryManager intent
 # qdrant-client
 sentence-transformers # For generating embeddings for vector stores (needed by MemoryManager)
+PyGithub # For GitHub API interactions
 
 # Observability
 langfuse # As per docker-compose.yml and MemoryManager intent
