@@ -713,3 +713,23 @@ You can interact with the semantic memory via the following API endpoints:
         ```
 
 *(For error responses, such as when the vector store is unavailable (503) or for bad requests (400), the API will return a JSON object like `{"error": "Error message", "detail": "Optional further details"}`.)*
+
+## Continuous Integration (CI)
+
+This project uses GitHub Actions for Continuous Integration. The CI workflow is defined in `.github/workflows/ci.yml`.
+
+The workflow is triggered on:
+- Pushes to any branch except `main` (or your primary branch).
+- Pull requests targeting the `main` branch (or your primary branch).
+
+The CI pipeline performs the following steps:
+1. **Sets up Python**: Initializes the Python environment.
+2. **Installs Dependencies**: Installs project dependencies from `requirements.txt` (if it exists) and also installs `pytest` and `ruff`.
+3. **Lints with Ruff**: Runs `ruff check .` to check for linting errors and code style issues.
+4. **Tests with Pytest**: Runs `pytest` to execute the test suite.
+
+### Reviewing CI Results
+
+When you open a pull request or push to a feature branch, the CI workflow will automatically run. You can view the status and results of the CI checks directly on GitHub in the "Checks" tab of the pull request or on the "Actions" tab of the repository.
+
+If any step in the CI pipeline fails (e.g., linting errors or failing tests), the check will be marked as failed. You can click on the details of the failed check to see the logs and identify the cause of the failure.
