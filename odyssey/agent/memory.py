@@ -18,6 +18,9 @@ from typing import List, Dict, Any, Optional
 
 # Import the new vector store components
 from .vector_store import ChromaVectorStore, VectorStoreInterface # Added VectorStoreInterface
+# Import ActualLangfuseClientWrapper for type hinting
+from .langfuse_client import LangfuseClientWrapper as ActualLangfuseClientWrapper
+
 
 logger = logging.getLogger(__name__)
 
@@ -482,13 +485,9 @@ class MemoryManager:
         # TODO: Implement backup of SQLite tables (tasks, plans, logs) to JSON files.
         # Consider which tables are critical for backup.
 
-    def log_to_langfuse(self, event: dict) -> None:
-        """
-        (STUB) Logs an event to Langfuse for observability.
-        :param event: A dictionary representing the event to log.
+    def log_to_langfuse(self, event_data: dict, trace_id: Optional[Any] = None) -> None:
         """
         Logs an event to Langfuse if the wrapper is active.
-        This replaces the old stub method.
 
         :param event_data: A dictionary containing data for the Langfuse event.
                            Should include 'event_type' as a key for the Langfuse event name.
@@ -505,33 +504,15 @@ class MemoryManager:
             # Remaining event_data items are considered metadata
             metadata = event_data
 
-            # If a specific trace_id (object or string) isn't passed, this event might not be linked
-            # or the LangfuseClientWrapper might create a default trace for it.
-            # For MemoryManager events, it's often good if they are part of a larger operation's trace.
-            # The caller of MemoryManager methods would ideally pass a parent_trace_obj.
-            # For now, if no trace_id is passed, it will create a new trace per event.
-            # This might be too granular; consider how to manage traces for sequences of memory ops.
-            # For now, let's assume trace_id is None if not explicitly passed by instrumented methods.
-            # This means instrumented methods MUST be updated to create/pass traces.
-            # Let's simplify: MemoryManager's internal methods will create their own trace if one isn't implicitly available.
-            # The LangfuseClientWrapper's log_event can handle creating a default trace.
-
-            # For now, the instrumented methods will just call this with event_data.
-            # The trace management (creating a top-level trace for an operation and passing it down)
-            # should ideally happen at a higher level (e.g., in API handlers or Celery tasks).
-            # If MemoryManager methods are called without a parent trace, they will create their own.
-
-            # Let's adjust the wrapper's log_event to take trace_id, and here we might not always have one.
-            # The wrapper will handle creating a trace if trace_id is None.
             self.langfuse_wrapper.log_event(
-                trace_id=None, # Let wrapper create a trace if no parent context
+                trace_id=trace_id, # Pass along the trace_id
                 name=event_name,
                 input=input_data,
                 output=output_data,
                 metadata=metadata
             )
         # else:
-            # logger.debug(f"Langfuse not active. Event not logged: {event_name}")
+            # logger.debug(f"Langfuse not active. Event not logged for: {event_data.get('event_type', 'unknown_event')}")
 
 
     def close(self):
@@ -589,8 +570,10 @@ if __name__ == '__main__':
     task_id2 = memory.add_task("Write documentation for the API.")
     memory.add_task("Fix bug #123 in the UI.")
 
-    if task_id1: memory.update_task_status(task_id1, "in_progress")
-    if task_id2: memory.update_task_status(task_id2, "completed")
+    if task_id1:
+        memory.update_task_status(task_id1, "in_progress")
+    if task_id2:
+        memory.update_task_status(task_id2, "completed")
 
     all_tasks = memory.get_tasks()
     print(f"All tasks ({len(all_tasks)} found):")
@@ -729,7 +712,7 @@ if __name__ == '__main__':
                     "source_type": "semantic_match",
                     "content": hit, # The entire hit (id, text, metadata, distance) is content
                     "relevance_score": 1.0 - hit.get("distance", 1.0) if hit.get("distance") is not None else 0.0, # Convert distance to score
-                    "timestamp": datetime.datetime.fromisoformat(hit.get("metadata", {}).get("timestamp")) if hit.get("metadata", {}).get("timestamp") else None
+                    "timestamp": datetime.datetime.fromisoformat(hit.get("metadata", {}).get("timestamp").replace("Z", "+00:00")) if hit.get("metadata", {}).get("timestamp") else None
                 })
 
         # 2. Structured Data Fetching
@@ -744,7 +727,7 @@ if __name__ == '__main__':
                     "source_type": "task",
                     "content": task,
                     "relevance_score": None, # No direct relevance score from this source yet
-                    "timestamp": datetime.datetime.fromisoformat(task.get("timestamp")) if task.get("timestamp") else None
+                    "timestamp": datetime.datetime.fromisoformat(task.get("timestamp").replace("Z", "+00:00")) if task.get("timestamp") else None
                 })
 
         if structured_options.get('include_db_logs', False):
@@ -757,7 +740,7 @@ if __name__ == '__main__':
                     "source_type": "db_log",
                     "content": log_entry,
                     "relevance_score": None,
-                    "timestamp": datetime.datetime.fromisoformat(log_entry.get("timestamp")) if log_entry.get("timestamp") else None
+                    "timestamp": datetime.datetime.fromisoformat(log_entry.get("timestamp").replace("Z", "+00:00")) if log_entry.get("timestamp") else None
                 })
 
         if structured_options.get('include_plans', False):
@@ -767,7 +750,7 @@ if __name__ == '__main__':
                     "source_type": "plan",
                     "content": plan,
                     "relevance_score": None,
-                    "timestamp": datetime.datetime.fromisoformat(plan.get("timestamp")) if plan.get("timestamp") else None
+                    "timestamp": datetime.datetime.fromisoformat(plan.get("timestamp").replace("Z", "+00:00")) if plan.get("timestamp") else None
                 })
 
         if structured_options.get('include_proposals', False):
@@ -778,13 +761,13 @@ if __name__ == '__main__':
                     "content": proposal,
                     "relevance_score": None,
                      # Use 'updated_at' as primary timestamp, fallback to 'created_at'
-                    "timestamp": datetime.datetime.fromisoformat(proposal.get("updated_at")) if proposal.get("updated_at") else (datetime.datetime.fromisoformat(proposal.get("created_at")) if proposal.get("created_at") else None)
+                    "timestamp": datetime.datetime.fromisoformat(proposal.get("updated_at").replace("Z", "+00:00")) if proposal.get("updated_at") else (datetime.datetime.fromisoformat(proposal.get("created_at").replace("Z", "+00:00")) if proposal.get("created_at") else None)
                 })
 
         # Simple concatenation for now. Future: sort by timestamp or relevance_score if normalized.
         # Sort by timestamp descending (most recent first), if available
         try:
-            all_results.sort(key=lambda x: x.get("timestamp") or datetime.datetime.min, reverse=True)
+            all_results.sort(key=lambda x: x.get("timestamp") or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc), reverse=True)
         except TypeError as te:
             logger.warning(f"Hybrid query: Could not sort results by timestamp due to type error (possibly None mixed with datetime without proper handling for all items): {te}")
             # Proceed with unsorted or partially sorted results if timestamps are inconsistent

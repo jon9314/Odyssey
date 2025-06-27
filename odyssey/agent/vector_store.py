@@ -6,6 +6,7 @@ import logging
 import uuid
 from abc import ABC, abstractmethod
 from typing import List, Dict, Optional, Any
+import os # Moved from L249
 
 # Attempt to import chromadb and its components.
 # If not installed, ChromaVectorStore will not be usable but interface can be defined.
@@ -224,8 +225,10 @@ class ChromaVectorStore(VectorStoreInterface):
 
         try:
             log_msg = "Attempting to delete documents from Chroma collection"
-            if ids: log_msg += f" by IDs (count: {len(ids)}, first ID: {ids[0] if ids else 'N/A'})"
-            if metadata_filter: log_msg += f" by metadata filter: {metadata_filter}"
+            if ids:
+                log_msg += f" by IDs (count: {len(ids)}, first ID: {ids[0] if ids else 'N/A'})"
+            if metadata_filter:
+                log_msg += f" by metadata filter: {metadata_filter}"
             logger.info(log_msg)
 
             self.collection.delete(ids=ids, where=metadata_filter)
@@ -243,6 +246,8 @@ class ChromaVectorStore(VectorStoreInterface):
             logger.error(f"Failed to get count for Chroma collection '{self.collection_name}': {e}", exc_info=True)
             return 0 # Or raise
 
+
+# import os # Moved to top
 
 # Example Usage (Conceptual - would run if this script is executed directly)
 if __name__ == "__main__":

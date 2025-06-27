@@ -26,7 +26,7 @@ class CalendarTool:
         Placeholder for initializing the actual calendar service connection.
         """
         if self.api_key:
-            print(f"Mock: Would initialize Google Calendar service with API key.")
+            print("Mock: Would initialize Google Calendar service with API key.")
             # Example: from googleapiclient.discovery import build
             # creds = ... (load credentials)
             # service = build('calendar', 'v3', credentials=creds)

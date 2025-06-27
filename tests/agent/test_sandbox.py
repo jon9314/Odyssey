@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch, MagicMock, call # import call
+from unittest.mock import patch, MagicMock # import call # Removed unused 'call'
 import os
 
 from odyssey.agent.sandbox import Sandbox
@@ -85,13 +85,13 @@ class TestSandboxDockerValidation(unittest.TestCase):
         self.assertTrue(success)
         self.assertIn("Image built successfully", output_log)
         self.assertIn("containerid1234567890abcdef", output_log)
-        self.assertIn(f"Health check PASSED. Status: 200", output_log)
+        self.assertIn("Health check PASSED. Status: 200", output_log)
         self.assertIn("Tests PASSED inside Docker container.", output_log)
         self.assertIn("Test execution STDOUT:\nTests executed, all good.", output_log)
         self.assertIn("Cleaning up container", output_log)
         self.assertIn("Cleaning up image", output_log)
 
-        expected_image_name_part = f"odyssey-proposal-{proposal_id.replace('_', '-')}"
+        # expected_image_name_part = f"odyssey-proposal-{proposal_id.replace('_', '-')}" # F841 Unused variable
 
         # Check calls
         self.assertEqual(mock_subprocess_run.call_count, 6) # build, run, exec, stop, rm, rmi

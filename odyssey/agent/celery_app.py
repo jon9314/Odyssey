@@ -14,7 +14,6 @@ To run a Celery worker for Odyssey:
 
 You can also use `docker compose run --rm celery_worker` if defined in docker-compose.yml.
 """
-import os
 from celery import Celery
 from pydantic_settings import BaseSettings
 import logging
@@ -127,4 +126,3 @@ if __name__ == '__main__':
     logger.info("Celery app `odyssey.agent.celery_app` is defined.")
     logger.info("To start a worker from project root: `celery -A odyssey.agent.celery_app worker -l INFO -Q default`")
     logger.info("Ensure your broker (Valkey/Redis) is running and configured in .env or settings.")
-```

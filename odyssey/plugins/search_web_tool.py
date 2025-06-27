@@ -3,7 +3,7 @@ SearchWebTool (Stub) for the Odyssey agent.
 Simulates web search functionality.
 """
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 import json # For pretty printing dummy data in logs if needed
 
 from odyssey.agent.tool_manager import ToolInterface
@@ -126,4 +126,3 @@ if __name__ == '__main__':
     print(json.dumps(res5, indent=2))
     if res5.get("status") == "success_stub_mode" and isinstance(res5.get("result"), list):
         assert len(res5["result"]) == 3
-```

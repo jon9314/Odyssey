@@ -14,6 +14,11 @@ Each task should ideally:
 import time
 import logging
 from typing import Any, Dict, Optional
+import subprocess
+import tempfile
+import shutil
+import os
+import shlex # For parsing command strings safely
 
 from .celery_app import celery_app # Import the Celery app instance
 
@@ -178,10 +183,6 @@ def execute_tool_task(self, tool_name: str, tool_args: Dict[str, Any]) -> Any:
                 logger.error(f"{log_prefix} Error closing MemoryManager: {e_close}", exc_info=True)
 
 
-import tempfile
-import shutil
-import os
-
 @celery_app.task(bind=True, name="odyssey.agent.tasks.run_sandbox_validation_task")
 def run_sandbox_validation_task(self, proposal_id: str, branch_name: str) -> Dict[str, Any]:
     """
@@ -252,8 +253,6 @@ def run_sandbox_validation_task(self, proposal_id: str, branch_name: str) -> Dic
 
         # 3. Fetch and checkout the specific proposal branch
         logger.info(f"{log_prefix} Fetching and checking out branch '{branch_name}' in temporary clone.")
-
-import shlex # For parsing command strings safely
 
         # Initialize SelfModifier with the path to the temporary clone.
         # Also pass the sandbox_manager instance to this SelfModifier, configured from AppSettings.
@@ -356,7 +355,7 @@ import shlex # For parsing command strings safely
 
     except Exception as e:
         logger.error(f"{log_prefix} Task critically failed. Error: {e}", exc_info=True)
-        if memory: # Attempt to log failure if possible
+        if memory:  # Attempt to log failure if possible
             try:
                 memory.log_proposal_step(
                     proposal_id=proposal_id, branch_name=branch_name, status="validation_error",
@@ -496,4 +495,3 @@ def merge_approved_proposal_task(self, proposal_id: str) -> Dict[str, Any]: # Re
         if memory:
             memory.close()
             logger.debug(f"{log_prefix} MemoryManager closed.")
-```

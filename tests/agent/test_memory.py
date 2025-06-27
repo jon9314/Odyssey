@@ -1,8 +1,7 @@
 import unittest
 import os
-import sqlite3
-import datetime
 import shutil # For cleaning up test directories
+from unittest.mock import MagicMock, patch # Moved E402
 from odyssey.agent.memory import MemoryManager
 
 # Use a dedicated test directory for database files to avoid conflicts
@@ -321,7 +320,7 @@ if __name__ == '__main__':
 
 
 # New test class for semantic memory functionalities
-from unittest.mock import MagicMock, patch
+# from unittest.mock import MagicMock, patch # Already moved to top
 
 class TestMemoryManagerSemanticMemory(unittest.TestCase):
     @classmethod

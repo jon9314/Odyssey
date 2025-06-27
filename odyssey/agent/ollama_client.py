@@ -7,6 +7,8 @@ import requests
 import json
 import logging
 from typing import Optional, List, Dict, Any, Generator, Tuple
+from datetime import datetime # For Langfuse timestamps
+from .langfuse_client import LangfuseClientWrapper as ActualLangfuseClientWrapper # For actual use
 
 # Use a more specific logger name for this client
 logger = logging.getLogger("odyssey.agent.ollama_client")
@@ -15,8 +17,8 @@ logger = logging.getLogger("odyssey.agent.ollama_client")
 LangfuseClientWrapper = "LangfuseClientWrapper" # Works if LangfuseClientWrapper is in a separate file
 # If in the same file or complex, from typing import ForwardRef; LangfuseClientWrapper = ForwardRef('LangfuseClientWrapper')
 # However, direct import is better if possible. Let's assume it will be importable from .langfuse_client
-from .langfuse_client import LangfuseClientWrapper as ActualLangfuseClientWrapper # For actual use
-from datetime import datetime # For Langfuse timestamps
+# from .langfuse_client import LangfuseClientWrapper as ActualLangfuseClientWrapper # Moved to top
+# from datetime import datetime # Moved to top
 
 
 class OllamaClient:
@@ -89,13 +91,13 @@ class OllamaClient:
             logger.warning(f"Could not decode JSON response for models from {instance_name} instance ({base_url}).")
             return []
 
-    def _choose_instance_and_model(self, requested_model: str, prefer_safe_ यानी_local: bool) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    def _choose_instance_and_model(self, requested_model: str, prefer_safe_or_local: bool) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """
         Chooses which Ollama instance (local or remote) and model to use.
 
         Args:
             requested_model: The model name (e.g., 'llama3', 'phi3:latest', 'auto').
-            prefer_safe_ यानी_local: If True, prefers the local instance for "safe" requests.
+            prefer_safe_or_local: If True, prefers the local instance for "safe" requests.
 
         Returns:
             A tuple (instance_url, actual_model_name_with_tag, instance_type_name)
@@ -107,8 +109,8 @@ class OllamaClient:
             logger.info(f"Model 'auto' selected, using default model: '{self.default_model}' for selection logic.")
 
         targets = []
-        # Order of preference based on 'prefer_safe_ यानी_local'
-        if prefer_safe_ यानी_local:
+        # Order of preference based on 'prefer_safe_or_local'
+        if prefer_safe_or_local:
             if self.local_url and self.available_local_models:
                 targets.append({"url": self.local_url, "models": self.available_local_models, "name": "local"})
             if self.remote_url and self.available_remote_models:
@@ -194,9 +196,12 @@ class OllamaClient:
             "component": "OllamaClient", "method": "ask", "requested_model": model,
             "safe_param": safe, "is_stream_request": stream,
         }
-        if options: _trace_metadata["ollama_options"] = options
-        if system_prompt: _trace_metadata["system_prompt_used"] = bool(system_prompt)
-        if trace_metadata: _trace_metadata.update(trace_metadata) # Merge caller's metadata
+        if options:
+            _trace_metadata["ollama_options"] = options
+        if system_prompt:
+            _trace_metadata["system_prompt_used"] = bool(system_prompt)
+        if trace_metadata:
+            _trace_metadata.update(trace_metadata) # Merge caller's metadata
 
         # Determine prompt structure for Langfuse logging (handles system prompts)
         langfuse_prompt_input = prompt
@@ -222,8 +227,10 @@ class OllamaClient:
         else:
             api_endpoint = f"{instance_url}/api/generate"
             payload = {"model": actual_model, "prompt": prompt, "stream": stream}
-            if options: payload["options"] = options
-            if system_prompt: payload["system"] = system_prompt
+            if options:
+                payload["options"] = options
+            if system_prompt:
+                payload["system"] = system_prompt
 
             log_prompt_snippet = prompt[:100] + "..." if len(prompt) > 100 else prompt
             logger.info(f"Sending prompt to Ollama '{instance_type}' ({actual_model}). Snippet: '{log_prompt_snippet}'")
@@ -343,7 +350,7 @@ class OllamaClient:
     def generate_embeddings(self,
                             text: str,
                             model: str = 'auto',
-                            prefer_safe_yani_local: bool = True,
+                            prefer_safe_or_local: bool = True,
                             # Langfuse related parameters
                             parent_trace_obj: Optional[Any] = None,
                             trace_name: Optional[str] = None,
@@ -369,12 +376,13 @@ class OllamaClient:
 
         _trace_metadata = {
             "component": "OllamaClient", "method": "generate_embeddings", "requested_model": model,
-            "prefer_safe_yani_local": prefer_safe_yani_local, "text_length": len(text)
+            "prefer_safe_or_local": prefer_safe_or_local, "text_length": len(text)
         }
-        if trace_metadata: _trace_metadata.update(trace_metadata)
+        if trace_metadata:
+            _trace_metadata.update(trace_metadata)
 
         instance_url, actual_model, instance_type = self._choose_instance_and_model(
-            model, prefer_safe_yani_local=prefer_safe_yani_local
+            model, prefer_safe_or_local=prefer_safe_or_local
         )
         _trace_metadata["instance_type_chosen"] = instance_type
         _trace_metadata["actual_model_chosen"] = actual_model
@@ -383,12 +391,11 @@ class OllamaClient:
         error_for_langfuse = None
         final_embedding_output: Optional[List[float]] = None
 
-
         if not instance_url or not actual_model:
-            error_msg = f"Error: Could not find suitable Ollama instance/model for embedding (model='{model}', safe='{prefer_safe_yani_local}')."
+            error_msg = f"Error: Could not find suitable Ollama instance/model for embedding (model='{model}', safe='{prefer_safe_or_local}')." # Corrected here
             logger.error(error_msg)
             error_for_langfuse = error_msg
-            final_embedding_output = None
+            # final_embedding_output is already None
         else:
             api_endpoint = f"{instance_url}/api/embeddings"
             payload = { "model": actual_model, "prompt": text }
@@ -396,45 +403,44 @@ class OllamaClient:
 
             try:
                 response = requests.post(
-                api_endpoint,
-                data=json.dumps(payload),
-                headers={"Content-Type": "application/json"},
-                timeout=self.request_timeout
-            )
-            response.raise_for_status()
-            response_data = response.json()
-            embedding_data = response_data.get("embedding")
+                    api_endpoint,
+                    data=json.dumps(payload),
+                    headers={"Content-Type": "application/json"},
+                    timeout=self.request_timeout
+                )
+                response.raise_for_status()
+                response_data = response.json()
+                embedding_data = response_data.get("embedding")
 
-            if isinstance(embedding_data, list) and all(isinstance(x, (float, int)) for x in embedding_data):
-                logger.info(f"Successfully generated embedding from {instance_type} ({actual_model}). Embedding dim: {len(embedding_data)}")
-                final_embedding_output = [float(x) for x in embedding_data]
-                embedding_result_for_langfuse = {"dimension": len(final_embedding_output), "first_3_values": final_embedding_output[:3]}
-            else:
-                error_msg = f"Unexpected embedding format from Ollama ({instance_type}, {actual_model}). Response: {response_data}"
+                if isinstance(embedding_data, list) and all(isinstance(x, (float, int)) for x in embedding_data):
+                    logger.info(f"Successfully generated embedding from {instance_type} ({actual_model}). Embedding dim: {len(embedding_data)}")
+                    final_embedding_output = [float(x) for x in embedding_data]
+                    embedding_result_for_langfuse = {"dimension": len(final_embedding_output), "first_3_values": final_embedding_output[:3]}
+                else:
+                    error_msg = f"Unexpected embedding format from Ollama ({instance_type}, {actual_model}). Response: {response_data}"
+                    logger.error(error_msg)
+                    error_for_langfuse = error_msg
+                    # final_embedding_output is already None
+            except requests.exceptions.Timeout:
+                error_msg = f"Timeout for embeddings ({instance_type} at {api_endpoint}) after {self.request_timeout}s."
                 logger.error(error_msg)
                 error_for_langfuse = error_msg
-                final_embedding_output = None
-
-        except requests.exceptions.Timeout:
-            error_msg = f"Timeout for embeddings ({instance_type} at {api_endpoint}) after {self.request_timeout}s."
-            logger.error(error_msg)
-            error_for_langfuse = error_msg
-            final_embedding_output = None
-        except requests.exceptions.RequestException as e:
-            error_msg = f"Request error for embeddings ({instance_type} at {api_endpoint}): {e}"
-            logger.error(error_msg)
-            error_for_langfuse = error_msg
-            final_embedding_output = None
-        except json.JSONDecodeError:
-            error_msg = f"Could not decode JSON for embeddings ({instance_type} at {api_endpoint})."
-            logger.error(error_msg)
-            error_for_langfuse = error_msg
-            final_embedding_output = None
-        except Exception as e:
-            error_msg = f"Unexpected error generating embeddings ({instance_type} at {api_endpoint}): {e}"
-            logger.error(error_msg, exc_info=True)
-            error_for_langfuse = error_msg
-            final_embedding_output = None
+                # final_embedding_output is already None
+            except requests.exceptions.RequestException as e:
+                error_msg = f"Request error for embeddings ({instance_type} at {api_endpoint}): {e}"
+                logger.error(error_msg)
+                error_for_langfuse = error_msg
+                # final_embedding_output is already None
+            except json.JSONDecodeError:
+                error_msg = f"Could not decode JSON for embeddings ({instance_type} at {api_endpoint})."
+                logger.error(error_msg)
+                error_for_langfuse = error_msg
+                # final_embedding_output is already None
+            except Exception as e:
+                error_msg = f"Unexpected error generating embeddings ({instance_type} at {api_endpoint}): {e}"
+                logger.error(error_msg, exc_info=True)
+                error_for_langfuse = error_msg
+                # final_embedding_output is already None
 
         end_time = datetime.utcnow()
         if self.langfuse_wrapper and self.langfuse_wrapper.active:
@@ -518,7 +524,8 @@ if __name__ == '__main__':
         # `safe=True` prefers local.
         instance1, model_used1, response1 = client_to_test.ask("Briefly, what is Python?", model='auto', safe=True)
         logger.info(f"Test 1: Instance='{instance1}', Model='{model_used1}'. Response snippet: {str(response1)[:100]}...")
-        if "Error:" in str(response1): logger.error(f"Test 1 failed: {response1}")
+        if "Error:" in str(response1):
+            logger.error(f"Test 1 failed: {response1}")
 
 
         logger.info("\n--- Test 2: Streaming call (safe=False, would prefer remote if configured & model available there) ---")
@@ -544,7 +551,8 @@ if __name__ == '__main__':
             system_prompt="You are a friendly pirate captain. Respond as such, matey!"
         )
         logger.info(f"Test 3: Instance='{instance3}', Model='{model_used3}'. Response snippet: {str(response3)[:100]}...")
-        if "Error:" in str(response3): logger.error(f"Test 3 failed: {response3}")
+        if "Error:" in str(response3):
+            logger.error(f"Test 3 failed: {response3}")
 
 
         logger.info("\n--- Test 4: Requesting a non-existent model ---")
@@ -561,7 +569,8 @@ if __name__ == '__main__':
             options={"temperature": 0.95, "num_predict": 60} # Higher temp, limit response length
         )
         logger.info(f"Test 5: Instance='{instance5}', Model='{model_used5}'. Response snippet: {str(response5)[:100]}...")
-        if "Error:" in str(response5): logger.error(f"Test 5 failed: {response5}")
+        if "Error:" in str(response5):
+            logger.error(f"Test 5 failed: {response5}")
 
         logger.info("\n--- Test 6: Generating embeddings ---")
         # Ensure the model used (e.g., phi3) supports embedding generation.
@@ -573,6 +582,6 @@ if __name__ == '__main__':
         if embedding:
             logger.info(f"Test 6: Embedding generated. Type: {type(embedding)}, Dim: {len(embedding)}, First 5 values: {embedding[:5]}")
         else:
-            logger.error(f"Test 6: Embedding generation failed.")
+            logger.error("Test 6: Embedding generation failed.")
 
     logger.info("OllamaClient example finished.")

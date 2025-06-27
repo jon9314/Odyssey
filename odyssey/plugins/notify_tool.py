@@ -5,6 +5,7 @@ Requires Ntfy server URL and topic to be configured.
 """
 import requests
 import logging
+import os # Added import
 from typing import Dict, Any, Optional, List
 
 from odyssey.agent.tool_manager import ToolInterface
@@ -154,7 +155,9 @@ if __name__ == '__main__':
         print("WARNING: TEST_NTFY_TOPIC environment variable not set. Notify tool will run in STUB mode for this test.")
         print("To test live notifications, set TEST_NTFY_TOPIC (e.g., 'odyssey_agent_test_alerts').")
         # Force stub mode for the test if topic is missing
-        class StubSettings: ntfy_server_url = "https://ntfy.sh"; ntfy_topic = None
+        class StubSettings:
+            ntfy_server_url = "https://ntfy.sh"
+            ntfy_topic = None
         mock_settings_for_stub = StubSettings()
         tool = NotifyTool(settings=mock_settings_for_stub)
     else:
@@ -187,4 +190,3 @@ if __name__ == '__main__':
 
     if not tool.stub_mode and mock_settings.ntfy_topic:
         print(f"\nCheck your Ntfy topic '{mock_settings.ntfy_topic}' at {mock_settings.ntfy_server_url}/{mock_settings.ntfy_topic} for messages.")
-```

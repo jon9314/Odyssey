@@ -170,17 +170,20 @@ if __name__ == '__main__':
     print(f"\n1. Fetch small JSON content from '{test_url_success}':")
     res1 = tool.execute(url=test_url_success)
     print(res1)
-    if res1.get("status") == "success": print(f"  Content snippet: {res1.get('result', '')[:100]}...")
+    if res1.get("status") == "success":
+        print(f"  Content snippet: {res1.get('result', '')[:100]}...")
 
     print(f"\n2. Fetch from '{test_url_large_page}' with max_bytes=500:")
     res2 = tool.execute(url=test_url_large_page, max_bytes=500)
     print(res2)
-    if res2.get("status") == "success": print(f"  Content length: {len(res2.get('result',''))} (should be around 500 or less)")
+    if res2.get("status") == "success":
+        print(f"  Content length: {len(res2.get('result',''))} (should be around 500 or less)")
 
     print(f"\n3. Fetch from '{test_url_large_page}' with no byte limit (max_bytes=0):")
     res3 = tool.execute(url=test_url_large_page, max_bytes=0) # Test no limit
     print(f"  Status: {res3.get('status')}")
-    if res3.get("status") == "success": print(f"  Content length: {len(res3.get('result',''))} (full page, could be large)")
+    if res3.get("status") == "success":
+        print(f"  Content length: {len(res3.get('result',''))} (full page, could be large)")
 
 
     print(f"\n4. Attempt to fetch non-existent domain '{test_url_nonexistent}':")
@@ -205,4 +208,3 @@ if __name__ == '__main__':
     # print(res7)
     # # The result might be garbled if it tries to decode binary as utf-8/latin-1.
     # # This test is more about observing the warning and behavior.
-```

@@ -15,9 +15,12 @@ try:
 except ImportError as e:
     print(f"Error importing plugin classes for tests: {e}")
     # Define dummy classes if imports fail, to allow test structure to be seen
-    class CalendarTool: pass
-    class OCRTool: pass
-    class FileOpsTool: pass
+    class CalendarTool:
+        pass
+    class OCRTool:
+        pass
+    class FileOpsTool:
+        pass
 
 
 class TestCalendarTool(unittest.TestCase):

@@ -6,6 +6,7 @@ This tool demonstrates dependency injection of the MemoryManager.
 import logging
 from typing import Dict, Any, Optional, List
 import datetime
+import time # Added import
 from odyssey.agent.tool_manager import ToolInterface
 from odyssey.agent.memory import MemoryManager # For type hinting and usage
 
@@ -50,8 +51,10 @@ class GetNotesTool(ToolInterface):
                             Each note in the list is a dictionary.
         """
         log_message = f"[{self.name}] execute called."
-        if tag: log_message += f" tag='{tag}'"
-        if since: log_message += f" since='{since}'"
+        if tag:
+            log_message += f" tag='{tag}'"
+        if since:
+            log_message += f" since='{since}'"
         log_message += f" limit={limit}"
         logger.info(log_message)
 
@@ -83,7 +86,7 @@ class GetNotesTool(ToolInterface):
 
                 # Filter by tag
                 if tag:
-                    if not f"TAG: {tag}" in message_content: # Simple string match for tag
+                    if f"TAG: {tag}" not in message_content: # Simple string match for tag
                         continue
 
                 # Filter by timestamp
@@ -234,4 +237,3 @@ if __name__ == '__main__':
     res6 = tool.execute(since="not-a-date")
     print(res6)
     assert res6['status'] == 'error'
-```

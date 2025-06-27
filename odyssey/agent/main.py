@@ -6,13 +6,12 @@ necessary resources like the MemoryManager during the application's lifespan.
 import logging
 import uvicorn
 import time # For request timing
-from fastapi import FastAPI, APIRouter, HTTPException, Request
+from fastapi import FastAPI, Request
 from contextlib import asynccontextmanager
-from typing import Callable # For middleware type hint
-
+from typing import Callable, Any, Optional # For middleware type hint, AppState
 import os # For loading environment variables
 from pydantic_settings import BaseSettings # For loading .env and typed settings
-from typing import Optional # For AppState type hints
+from fastapi.middleware.cors import CORSMiddleware # Moved E402
 
 # Import core components
 from odyssey.agent.memory import MemoryManager
@@ -98,7 +97,7 @@ class AppSettings(BaseSettings):
 
 # Application state to hold initialized components
 # Define Any for celery_app_instance if Celery app type is complex or not easily imported here
-from typing import Any
+# from typing import Any # Moved to top
 class AppState:
     settings: AppSettings
     memory_manager: MemoryManager
@@ -225,7 +224,7 @@ app = FastAPI(
 
 # --- CORS Middleware ---
 # This must be added before any routes are defined if it's to apply globally.
-from fastapi.middleware.cors import CORSMiddleware
+# from fastapi.middleware.cors import CORSMiddleware # Moved to top
 
 # Define allowed origins. For development, this often includes localhost ports
 # for the frontend dev server. In production, restrict this to your actual frontend domain.
@@ -339,4 +338,3 @@ if __name__ == "__main__":
 # unless FastAPI is configured to do so (which is not the default setup implied by the separate frontend service).
 # The comment "Starts the Odyssey backend and web interface" in the original description might mean
 # it's the entry point for the *project's backend services*, which the web interface then consumes.
-```

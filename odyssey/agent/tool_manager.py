@@ -6,7 +6,7 @@ import os
 import importlib
 import inspect
 import logging
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("odyssey.agent.tool_manager")
 
@@ -281,4 +281,3 @@ class ToolManager:
 # during automated testing. Individual tools have their own test blocks,
 # and ToolManager functionality will be tested via integration tests
 # or by running the main application and using its API endpoints.
-```

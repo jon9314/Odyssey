@@ -4,7 +4,7 @@ Lists files within the sandboxed, pre-configured safe directory.
 """
 import os
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any
 from odyssey.agent.tool_manager import ToolInterface
 
 logger = logging.getLogger("odyssey.plugins.list_files_tool")
@@ -55,7 +55,7 @@ class ListFilesTool(ToolInterface):
 
         if not os.path.isdir(BASE_FILE_PATH):
             logger.error(f"[{self.name}] Configured safe path is not a directory: {BASE_FILE_PATH}")
-            return {"error": f"Agent's file storage path is misconfigured (not a directory).", "status": "error"}
+            return {"error": "Agent's file storage path is misconfigured (not a directory).", "status": "error"}
 
         try:
             filenames = [f for f in os.listdir(BASE_FILE_PATH) if os.path.isfile(os.path.join(BASE_FILE_PATH, f))]
@@ -116,12 +116,14 @@ if __name__ == '__main__':
     for fname in dummy_files:
         try:
             os.remove(os.path.join(BASE_FILE_PATH, fname))
-        except OSError: pass
+        except OSError:
+            pass
 
     try: # Clean up subdir
         os.remove(os.path.join(BASE_FILE_PATH, dummy_dir, "sub_file.txt"))
         os.rmdir(os.path.join(BASE_FILE_PATH, dummy_dir))
-    except OSError: pass
+    except OSError:
+        pass
 
     if os.path.exists(BASE_FILE_PATH) and not os.listdir(BASE_FILE_PATH):
         try:
@@ -129,4 +131,3 @@ if __name__ == '__main__':
             print(f"Cleaned up directory: {BASE_FILE_PATH}")
         except OSError:
             print(f"Could not remove directory: {BASE_FILE_PATH}")
-```

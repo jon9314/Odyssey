@@ -1,8 +1,9 @@
 import unittest
+from unittest.mock import MagicMock, patch
 import os
 import shutil
 import tempfile
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Optional # Any removed
 
 # Mock chromadb and embedding_functions if not installed or for isolated testing
 # This allows tests to run even if the full environment isn't set up.
@@ -55,19 +56,25 @@ except ImportError:
         def delete(self, ids: Optional[List[str]] = None, where: Optional[Dict] = None):
             if ids:
                 for doc_id in ids:
-                    if doc_id in self._data: del self._data[doc_id]
-                    if doc_id in self._embeddings: del self._embeddings[doc_id]
+                    if doc_id in self._data:
+                        del self._data[doc_id]
+                    if doc_id in self._embeddings:
+                        del self._embeddings[doc_id]
             elif where:
                 to_delete = []
                 for doc_id, data in self._data.items():
                     match = True
                     for k, v in where.items():
                         if data["metadata"].get(k) != v:
-                            match = False; break
-                    if match: to_delete.append(doc_id)
+                            match = False
+                            break
+                    if match:
+                        to_delete.append(doc_id)
                 for doc_id in to_delete:
-                    if doc_id in self._data: del self._data[doc_id]
-                    if doc_id in self._embeddings: del self._embeddings[doc_id]
+                    if doc_id in self._data:
+                        del self._data[doc_id]
+                    if doc_id in self._embeddings:
+                        del self._embeddings[doc_id]
 
 
         def count(self):

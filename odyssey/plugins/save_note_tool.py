@@ -5,6 +5,7 @@ This tool demonstrates dependency injection of the MemoryManager.
 """
 import logging
 from typing import Dict, Any, Optional
+import datetime # Added import
 from odyssey.agent.tool_manager import ToolInterface
 from odyssey.agent.memory import MemoryManager # For type hinting and usage
 
@@ -61,15 +62,15 @@ class SaveNoteTool(ToolInterface):
                 metadata_payload["tag"] = tag
 
             # Using 'agent_note' as a specific type for these memory entries
-            note_id = self.memory_manager.log_event(
-                message=f"Note: {note[:100]}{'...' if len(note) > 100 else ''}", # For the 'message' field in logs table
-                level="NOTE", # Custom level for notes, or use INFO
-                # source=self.name, # This is for the 'source' field in the generic logs table
-                # For SaveNoteTool, we might want to use a more specific table if we had one,
-                # or a specific 'event_type' if using the generic 'events' table.
-                # The current MemoryManager spec has add_task, add_plan, log_event.
-                # Let's use log_event and store the note in the message, tag in metadata.
-            )
+            # note_id = self.memory_manager.log_event( # F841: This variable is not used, db_log_id is used later.
+            #     message=f"Note: {note[:100]}{'...' if len(note) > 100 else ''}", # For the 'message' field in logs table
+            #     level="NOTE", # Custom level for notes, or use INFO
+            #     # source=self.name, # This is for the 'source' field in the generic logs table
+            #     # For SaveNoteTool, we might want to use a more specific table if we had one,
+            #     # or a specific 'event_type' if using the generic 'events' table.
+            #     # The current MemoryManager spec has add_task, add_plan, log_event.
+            #     # Let's use log_event and store the note in the message, tag in metadata.
+            # )
             # Re-evaluating based on current MemoryManager:
             # The `log_event` method in MemoryManager stores to a `logs` table with (message, level, timestamp).
             # This is not ideal for structured notes.
@@ -90,7 +91,8 @@ class SaveNoteTool(ToolInterface):
 
             if db_log_id is not None:
                 success_msg = f"Note saved successfully with ID {db_log_id}."
-                if tag: success_msg += f" (Tag: '{tag}')"
+                if tag:
+                    success_msg += f" (Tag: '{tag}')"
                 logger.info(f"[{self.name}] {success_msg}")
                 return {"result": success_msg, "note_id": db_log_id, "status": "success"}
             else:
@@ -167,4 +169,3 @@ if __name__ == '__main__':
     print("\nMock Memory Manager Log Contents:")
     for logged_note in mock_memory.notes_log:
         print(logged_note)
-```

@@ -145,19 +145,22 @@ if __name__ == '__main__':
     res1 = tool.execute(filename=test_filename, content="Hello from WriteFileTool!\nFirst line.")
     print(res1)
     if os.path.exists(test_filepath):
-        with open(test_filepath, "r") as f: print(f"  Content: '{f.read().strip()}'")
+        with open(test_filepath, "r") as f:
+            print(f"  Content: '{f.read().strip()}'")
 
     print("\n2. Append to existing file:")
     res2 = tool.execute(filename=test_filename, content="Second line, appended.", mode="append")
     print(res2)
     if os.path.exists(test_filepath):
-        with open(test_filepath, "r") as f: print(f"  Content: '{f.read().strip()}'")
+        with open(test_filepath, "r") as f:
+            print(f"  Content: '{f.read().strip()}'")
 
     print("\n3. Overwrite existing file:")
     res3 = tool.execute(filename=test_filename, content="This is a complete overwrite.", mode="overwrite") # or default mode
     print(res3)
     if os.path.exists(test_filepath):
-        with open(test_filepath, "r") as f: print(f"  Content: '{f.read().strip()}'")
+        with open(test_filepath, "r") as f:
+            print(f"  Content: '{f.read().strip()}'")
 
     print("\n4. Attempt directory traversal (should fail):")
     print(tool.execute(filename="../evil.txt", content="sneaky"))
@@ -178,4 +181,3 @@ if __name__ == '__main__':
             print(f"Cleaned up directory: {BASE_FILE_PATH}")
         except OSError:
             print(f"Could not remove directory: {BASE_FILE_PATH}")
-```

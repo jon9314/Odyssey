@@ -5,8 +5,9 @@ Requires Google Calendar API to be enabled and a service account with appropriat
 """
 import os
 import logging
+import json # Added import
 import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 from odyssey.agent.tool_manager import ToolInterface
 # Attempt to import Google Calendar libraries
@@ -120,7 +121,8 @@ class CalendarEventTool(ToolInterface):
             try: # Try to parse more specific error from Google
                 err_details = json.loads(e.content).get('error', {}).get('message', err_content)
                 err_content = err_details
-            except: pass
+            except Exception: # Changed from bare except
+                pass
             logger.error(f"[{self.name}] Google API error adding event: {err_content}", exc_info=True)
             return {"error": f"Google API error: {err_content}", "status": "error"}
         except Exception as e:
@@ -165,7 +167,8 @@ class CalendarEventTool(ToolInterface):
             try:
                 err_details = json.loads(e.content).get('error', {}).get('message', err_content)
                 err_content = err_details
-            except: pass
+            except Exception: # Changed from bare except
+                pass
             logger.error(f"[{self.name}] Google API error listing events: {err_content}", exc_info=True)
             return {"error": f"Google API error: {err_content}", "status": "error"}
         except Exception as e:
@@ -341,4 +344,3 @@ if __name__ == '__main__':
     missing_param_res = tool.execute(action="add", title="Incomplete Event")
     print(missing_param_res)
     assert missing_param_res.get("status") == "error"
-```

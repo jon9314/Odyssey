@@ -1,6 +1,5 @@
 import unittest
-from unittest.mock import patch, MagicMock, mock_open, ANY
-import os # For os.path.join
+from unittest.mock import patch, MagicMock # mock_open, ANY, os removed
 
 # Import the Celery app and tasks
 from odyssey.agent.celery_app import celery_app

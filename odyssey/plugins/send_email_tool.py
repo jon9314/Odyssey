@@ -5,6 +5,7 @@ Requires SMTP server details to be configured in AppSettings/environment variabl
 """
 import smtplib
 import logging
+import os # Added import
 from email.mime.text import MIMEText
 from typing import Dict, Any, Optional
 
@@ -179,7 +180,12 @@ if __name__ == '__main__':
         # Force stub mode for the test if essential settings are missing for live send
         # Creating a settings object that will definitely trigger stub mode
         class StubSettings:
-            smtp_host = None; smtp_port=0; smtp_user=None; smtp_password=None; smtp_use_tls=False; smtp_sender_email=None
+            smtp_host = None
+            smtp_port = 0
+            smtp_user = None
+            smtp_password = None
+            smtp_use_tls = False
+            smtp_sender_email = None
         mock_settings_for_stub = StubSettings()
         tool = SendEmailTool(settings=mock_settings_for_stub)
 
@@ -211,4 +217,3 @@ if __name__ == '__main__':
     except TypeError as te:
         print(f"Caught TypeError (expected for missing required arg): {te}")
         # In API context, FastAPI/Pydantic would return 422 before tool execution.
-```

@@ -109,24 +109,28 @@ if __name__ == '__main__':
     print("\nDefault random string (length 12, alphanumeric):")
     res1 = rst_tool.execute()
     print(res1)
-    if res1.get("status") == "success": print(f"  Length: {len(res1.get('result', ''))}")
+    if res1.get("status") == "success":
+        print(f"  Length: {len(res1.get('result', ''))}")
 
 
     print("\nRandom string (length 8, hex):")
     res2 = rst_tool.execute(length=8, charset="hex")
     print(res2)
-    if res2.get("status") == "success": print(f"  Length: {len(res2.get('result', ''))}")
+    if res2.get("status") == "success":
+        print(f"  Length: {len(res2.get('result', ''))}")
 
     print("\nRandom string (length 16, alpha):")
     res3 = rst_tool.execute(length=16, charset="alpha")
     print(res3)
-    if res3.get("status") == "success": print(f"  Length: {len(res3.get('result', ''))}")
+    if res3.get("status") == "success":
+        print(f"  Length: {len(res3.get('result', ''))}")
 
 
     print("\nRandom string (length 10, numeric):")
     res4 = rst_tool.execute(length=10, charset="numeric")
     print(res4)
-    if res4.get("status") == "success": print(f"  Length: {len(res4.get('result', ''))}")
+    if res4.get("status") == "success":
+        print(f"  Length: {len(res4.get('result', ''))}")
 
 
     print("\nInvalid length (0):")
@@ -140,4 +144,3 @@ if __name__ == '__main__':
 
     print("\nInvalid length type ('ten'):")
     print(rst_tool.execute(length="ten"))
-```

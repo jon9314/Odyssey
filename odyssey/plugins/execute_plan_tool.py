@@ -228,4 +228,3 @@ if __name__ == '__main__':
     res5 = plan_executor_tool.execute(**invalid_input_format) # type: ignore
     print(json.dumps(res5, indent=2))
     # Expected: status "error" from plan executor itself
-```

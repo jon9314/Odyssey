@@ -1,21 +1,10 @@
 # For running/test new code
 import subprocess
-
-class Sandbox:
-    def __init__(self):
 import os
 import logging
-import shutil # For checking Dockerfile path more easily
-
-logger = logging.getLogger(__name__)
-
-class Sandbox:
-    def __init__(self):
-import os
-import logging
-import shutil # For checking Dockerfile path more easily
 import time # For health check delays
 import requests # For actual health checks
+from typing import Optional # Added Optional
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +85,12 @@ class Sandbox:
         build_success_flag = False # To track if image should be cleaned up
 
         def log_and_append(message: str, level: str = "info"):
-            if level == "info": logger.info(f"[{proposal_id}] {message}")
-            elif level == "warning": logger.warning(f"[{proposal_id}] {message}")
-            elif level == "error": logger.error(f"[{proposal_id}] {message}")
+            if level == "info":
+                logger.info(f"[{proposal_id}] {message}")
+            elif level == "warning":
+                logger.warning(f"[{proposal_id}] {message}")
+            elif level == "error":
+                logger.error(f"[{proposal_id}] {message}")
             output_log_lines.append(message)
 
         log_and_append(f"Starting Docker validation for proposal: {proposal_id}", "info")
@@ -209,7 +201,7 @@ class Sandbox:
         finally:
             # 5. Cleanup
             log_and_append(f"STEP 5: Cleaning up Docker resources for {proposal_id}...", "info")
-            if container_name:
+            if container_name: # Check if container_name was defined (it might not be if build fails early)
                 log_and_append(f"Stopping and removing container: {container_name}", "debug")
                 self._run_docker_command(["docker", "stop", container_name], timeout=60) # Give time to stop
                 self._run_docker_command(["docker", "rm", container_name], timeout=60)

@@ -3,20 +3,16 @@ API routes for the Odyssey agent.
 This module defines endpoints for interacting with tasks, logs, agent status,
 configuration, and other core functionalities.
 """
-import os # For dummy ID generation in examples
 from fastapi import APIRouter, HTTPException, Body, Depends, Query, Path
 from typing import List, Dict, Any, Optional
 
 # Import Pydantic models from schemas.py
 from .schemas import (
-    Item, ItemCreate, # Existing example schemas
     TaskCreateRequest, TaskResponse, TaskUpdateRequest, # Task schemas
     PlanCreateRequest, PlanResponse, # Plan schemas
     LogEntryResponse, LogCreateRequest, # Log schemas
     AgentConfig,
-    MemoryQuery, MemoryQueryResult,
-    ToolInfo, ToolExecutionRequest, ToolExecutionResult,
-    MessageResponse # General message response
+    ToolInfo, ToolExecutionRequest, ToolExecutionResult # General message response
 )
 
 import datetime # For LogCreateRequest default timestamp
@@ -24,18 +20,12 @@ import datetime # For LogCreateRequest default timestamp
 # Import Pydantic models from schemas.py
 from .schemas import (
     # Item, ItemCreate, # Example schemas (can be removed if not used)
-    TaskCreateRequest, TaskResponse, TaskUpdateRequest, # Task schemas
-    PlanCreateRequest, PlanResponse, # Plan schemas
-    LogEntryResponse, LogCreateRequest, # Log schemas
-    AgentConfig,
-    # MemoryQuery, MemoryQueryResult, # MemoryQuery might be replaced by specific GET filters
-    ToolInfo, ToolExecutionRequest, ToolExecutionResult,
-    MessageResponse, # General message response
     LLMAskRequest, LLMAskResponse, # LLM Schemas
     AddNumbersTaskRequest, SimulateLongTaskRequest, # Specific Celery task requests
     AsyncTaskResponse, AsyncTaskStatusResponse, # Generic Celery task responses
     ProposeChangeRequestSchema, ProposalResponseSchema, ProposalStatusResponseSchema, # Self Modification Schemas
-    SemanticAddRequest, SemanticAddResponse, SemanticQueryRequest, SemanticQueryResponse, SemanticQueryResponseItem, SemanticErrorResponse # Semantic Memory Schemas
+    SemanticAddRequest, SemanticAddResponse, SemanticQueryRequest, SemanticQueryResponse, SemanticQueryResponseItem, SemanticErrorResponse, # Semantic Memory Schemas
+    HybridQueryRequestSchema, HybridQueryResponseSchema # Added missing imports
 )
 import logging # For logging within route handlers if needed
 import uuid # For generating proposal IDs
@@ -91,7 +81,6 @@ async def get_tool_manager() -> ToolManager:
     if not hasattr(get_tool_manager, "instance"):
         print("Warning: get_tool_manager.instance not set by main.py lifespan. Creating fallback.")
         # ToolManager might auto-discover plugins on init, ensure path is correct for fallback
-        from odyssey.agent.main import AppSettings # Temp for project root
         import os
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")) # odyssey/api/ -> odyssey/
         plugins_dir = os.path.join(project_root, "plugins")
@@ -162,6 +151,7 @@ async def get_specific_task(
 @router.put("/tasks/{task_id}", response_model=TaskResponse, tags=["Tasks"])
 async def update_existing_task(
     task_id: int = Path(..., description="The ID of the task to update."),
+    *, # Make subsequent parameters keyword-only
     update_data: TaskUpdateRequest,
     memory: MemoryManager = Depends(get_memory_manager)
 ):

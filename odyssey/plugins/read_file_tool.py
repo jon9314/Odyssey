@@ -197,4 +197,3 @@ if __name__ == '__main__':
         except OSError:
             print(f"Could not remove directory (possibly not empty or permissions issue): {BASE_FILE_PATH}")
 
-```

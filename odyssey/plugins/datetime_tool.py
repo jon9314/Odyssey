@@ -4,7 +4,7 @@ Provides current date/time and simple time calculations.
 """
 import datetime
 import logging
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional
 from odyssey.agent.tool_manager import ToolInterface
 
 logger = logging.getLogger("odyssey.plugins.datetime_tool")
@@ -101,4 +101,3 @@ if __name__ == '__main__':
     # Test with a very large number that might overflow (platform dependent)
     # print("\nOverflow test (very large delta):")
     # print(dt_tool.execute(delta_seconds=10**18))
-```

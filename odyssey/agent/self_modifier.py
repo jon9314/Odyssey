@@ -1,7 +1,6 @@
 # Handles self-rewriting, GitHub branching, and reloads
 import os
 import subprocess
-import importlib
 import logging
 from typing import Optional # Added for type hinting
 

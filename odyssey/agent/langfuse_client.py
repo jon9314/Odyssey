@@ -3,6 +3,7 @@ Wrapper for the Langfuse Python SDK to provide a centralized client
 for observability and tracing within the Odyssey agent.
 """
 import logging
+import os # For environ.get in example
 from typing import Optional, Any, Dict, List
 from datetime import datetime
 
@@ -13,11 +14,16 @@ try:
 except ImportError:
     LANGFUSE_AVAILABLE = False
     # Define dummy classes if langfuse is not available, so type hints and calls don't break.
-    class CreateTrace: pass
-    class CreateGeneration: pass
-    class CreateEvent: pass
-    class CreateScore: pass
-    class UpdateGeneration: pass
+    class CreateTrace:
+        pass
+    class CreateGeneration:
+        pass
+    class CreateEvent:
+        pass
+    class CreateScore:
+        pass
+    class UpdateGeneration:
+        pass
     logging.warning("Langfuse library not found. LangfuseClientWrapper will operate in no-op mode.")
 
 logger = logging.getLogger(__name__)
@@ -86,12 +92,18 @@ class LangfuseClientWrapper:
             # The SDK's `trace()` method creates a new trace if one isn't active in context.
             # For creating a specific trace or continuing one, we use CreateTrace.
             trace_params = {"name": name}
-            if trace_id: trace_params["id"] = trace_id
-            if user_id: trace_params["user_id"] = user_id
-            if session_id: trace_params["session_id"] = session_id
-            if metadata: trace_params["metadata"] = metadata
-            if tags: trace_params["tags"] = tags
-            if self.release: trace_params["release"] = self.release
+            if trace_id:
+                trace_params["id"] = trace_id
+            if user_id:
+                trace_params["user_id"] = user_id
+            if session_id:
+                trace_params["session_id"] = session_id
+            if metadata:
+                trace_params["metadata"] = metadata
+            if tags:
+                trace_params["tags"] = tags
+            if self.release:
+                trace_params["release"] = self.release
 
             # The SDK's Trace object is usually obtained via `langfuse.trace()`
             # This method is more for creating a trace explicitly.
@@ -150,7 +162,7 @@ class LangfuseClientWrapper:
                 logger.warning(f"No valid Trace object for trace_id '{trace_id}'. Creating new trace for this generation.")
                 actual_trace = self.client.trace(name=name or "Generation Trace", id=trace_id if trace_id else None)
             else: # trace_id was None or some other invalid type
-                 logger.warning(f"No valid Trace object or ID. Creating new trace for this generation.")
+                 logger.warning("No valid Trace object or ID. Creating new trace for this generation.")
                  actual_trace = self.client.trace(name=name or "Generation Trace")
 
 
@@ -204,7 +216,7 @@ class LangfuseClientWrapper:
                 logger.warning(f"No valid Trace object for trace_id '{trace_id}'. Creating new trace for this event.")
                 actual_trace = self.client.trace(name=name or "Event Trace", id=trace_id if trace_id else None)
             else:
-                 logger.warning(f"No valid Trace object or ID. Creating new trace for this event.")
+                 logger.warning("No valid Trace object or ID. Creating new trace for this event.")
                  actual_trace = self.client.trace(name=name or "Event Trace")
 
         try:
@@ -240,7 +252,8 @@ class LangfuseClientWrapper:
             return None
         try:
             score_params = {"trace_id": trace_id, "name": name, "value": value}
-            if comment: score_params["comment"] = comment
+            if comment:
+                score_params["comment"] = comment
 
             score_obj = self.client.score(**score_params)
             logger.info(f"Langfuse score added: TraceID='{trace_id}', Name='{name}', Value='{value}'")
@@ -349,4 +362,3 @@ if __name__ == "__main__":
             logger.warning("Langfuse client not active. Example operations were skipped.")
 
     logger.info("LangfuseClientWrapper example finished.")
-```

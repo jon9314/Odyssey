@@ -120,4 +120,3 @@ if __name__ == '__main__':
     print("Test Invalid Operation (10 @ 2):", calc_tool.execute(num1=10, num2=2, operation="modulo"))
     print("Test with floats (3.5 * 2.0):", calc_tool.execute(num1=3.5, num2=2.0, operation="multiply"))
 
-```
