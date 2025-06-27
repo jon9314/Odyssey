@@ -3,27 +3,47 @@ import os
 import subprocess
 import importlib
 import logging
+from typing import Optional # Added for type hinting
+
+from github import Github, GithubException # Import PyGithub
 
 # Configure logging for this module
 logger = logging.getLogger(__name__)
 
 class SelfModifier:
-    def __init__(self, repo_path=".", github_token=None, sandbox_manager=None):
+    def __init__(self, repo_path=".", github_token=None, repo_owner=None, repo_name=None, sandbox_manager=None):
         """
         Initializes the SelfModifier.
         :param repo_path: Path to the Git repository (defaults to current directory).
         :param github_token: GitHub Personal Access Token for PR operations.
+        :param repo_owner: Owner of the GitHub repository (username or organization).
+        :param repo_name: Name of the GitHub repository.
         :param sandbox_manager: An instance of a sandbox manager (e.g., from sandbox.py)
                                  to run tests.
         """
         self.repo_path = os.path.abspath(repo_path)
-        self.github_token = github_token  # TODO: Use this for actual GitHub API calls
+        self.github_token = github_token
+        self.repo_owner = repo_owner
+        self.repo_name = repo_name
         self.sandbox_manager = sandbox_manager
+        self.github_client = None
+
+        if self.github_token and self.repo_owner and self.repo_name:
+            try:
+                self.github_client = Github(self.github_token)
+                # Optionally, test connection or get repo object here to fail early
+                # self.github_client.get_repo(f"{self.repo_owner}/{self.repo_name}")
+                logger.info(f"PyGithub client initialized for repo: {self.repo_owner}/{self.repo_name}")
+            except Exception as e: # Catching generic Exception, can be more specific e.g. GithubException
+                logger.error(f"Failed to initialize PyGithub client for {self.repo_owner}/{self.repo_name}: {e}")
+                self.github_client = None # Ensure client is None if init fails
+        else:
+            logger.warning("GitHub token, repo owner, or repo name not provided. GitHub PR features will be disabled.")
 
         if not self._is_git_repo():
             logger.warning(f"Path '{self.repo_path}' is not a Git repository. Some operations will fail.")
 
-        logger.info(f"SelfModifier initialized for repository: {self.repo_path}")
+        # logger.info(f"SelfModifier initialized for repository: {self.repo_path}") # Covered by specific github init log or warning
 
     def _is_git_repo(self) -> bool:
         """Checks if the repo_path is a valid Git repository."""
@@ -104,10 +124,10 @@ class SelfModifier:
         :param branch_name: Specific name for the new branch. If None, generated using prefix and proposal_id.
         :param branch_prefix: Optional prefix for the new branch name (e.g., "feature", "fix").
         :param proposal_id: Optional unique ID to include in the generated branch name for traceability.
-        :return: The name of the branch created and pushed.
-        :raises: Exception if critical Git operations fail (e.g., creating branch, committing).
+        :return: Tuple (branch_name: str, pr_url: Optional[str], pr_number: Optional[int], error_message: Optional[str])
+        :raises: Exception if critical Git operations fail (e.g., creating branch, committing, pushing).
         """
-        logger.info(f"Proposing code changes with commit message: '{commit_message}'")
+        logger.info(f"Proposing code changes with commit message: '{commit_message}' for proposal_id: {proposal_id}")
 
         if not self._is_git_repo():
             raise Exception("Error: Current path is not a Git repository.")
@@ -173,10 +193,39 @@ class SelfModifier:
             raise Exception(f"Changes committed to local branch '{branch_name}', but push failed: {stderr}")
 
         # 6. Switch back to the original branch (optional, good practice)
-        self.checkout_branch(current_branch)
+        self.checkout_branch(current_branch) # Switched back before PR attempt for safety
 
-        logger.info(f"Successfully proposed code changes on branch: {branch_name}")
-        return branch_name
+        logger.info(f"Successfully pushed code changes to branch: {branch_name}")
+
+        # 7. Open a Pull Request
+        pr_url, pr_number, pr_error = None, None, None
+        if self.github_client: # Only attempt if PyGithub client is initialized
+            logger.info(f"Attempting to open PR for branch '{branch_name}'...")
+            # Determine default PR title from commit message if not overridden
+            pr_title = f"Proposal {proposal_id}: {commit_message.splitlines()[0]}"
+            # Determine PR body, could include proposal_id or more details
+            pr_body = f"Automated PR for proposal ID: {proposal_id}\n\nBranch: `{branch_name}`\nCommit: `{commit_message}`"
+
+            # Assuming 'main' or a configurable default base branch for PRs.
+            # This could be passed in or configured in AppSettings.
+            default_base_branch = "main" # Or load from config
+
+            pr_url, pr_number, pr_error = self.open_pr(
+                branch=branch_name,
+                title=pr_title,
+                body=pr_body,
+                base_branch=default_base_branch
+            )
+            if pr_error:
+                logger.error(f"Failed to open PR for branch '{branch_name}': {pr_error}")
+                # Return branch name and PR error, but not fatal to proposal if push succeeded
+            else:
+                logger.info(f"PR opened successfully: {pr_url} (Number: {pr_number})")
+        else:
+            logger.warning(f"Skipping PR creation for branch '{branch_name}' as GitHub client is not configured.")
+            pr_error = "GitHub client not configured, PR not created."
+
+        return branch_name, pr_url, pr_number, pr_error
 
     def merge_branch(self, branch_to_merge: str, target_branch: str = "main", delete_branch_after_merge: bool = True) -> tuple[bool, str]:
         """
@@ -260,53 +309,68 @@ class SelfModifier:
         :param title: Optional title for the PR. If None, uses the last commit message of the branch.
         :param body: Optional body/description for the PR.
         :param base_branch: The branch to open the PR against (e.g., 'main', 'develop').
-        :return: URL of the created PR, or an error message.
+        :return: Tuple (pr_url: Optional[str], pr_number: Optional[int], error_message: Optional[str])
         """
-        # This requires GitHub API interaction (e.g., using PyGithub or `gh` CLI)
-        # For now, this is a placeholder.
         logger.info(f"Attempting to open PR for branch '{branch}' against '{base_branch}'.")
-        if not self.github_token:
-            logger.warning("GitHub token not provided. Cannot open PR via API.")
-            # Fallback: provide instructions for manual PR or using gh CLI
-            try:
-                # Check if gh CLI is installed
-                subprocess.run(["gh", "--version"], check=True, capture_output=True)
 
-                pr_title = title
-                if not pr_title:
-                    # Get last commit message for title
-                    commit_msg, _, ret_code = self._run_git_command(["log", "-1", "--pretty=%B", branch])
-                    if ret_code == 0 and commit_msg:
-                        pr_title = commit_msg.splitlines()[0] # Use first line of commit message
-                    else:
-                        pr_title = f"Proposed changes from branch {branch}"
+        if not self.github_client:
+            msg = "PyGithub client not initialized (missing token, owner, or repo name). Cannot open PR."
+            logger.error(msg)
+            return None, None, msg
 
-                pr_body = body if body else f"Automated PR for changes in branch {branch}."
+        try:
+            repo_full_name = f"{self.repo_owner}/{self.repo_name}"
+            repo = self.github_client.get_repo(repo_full_name)
+            logger.debug(f"Successfully connected to repository: {repo_full_name}")
 
-                # Use gh CLI to open PR
-                # Ensure you are logged in with `gh auth login` if using this.
-                pr_command = ["gh", "pr", "create", "--base", base_branch, "--head", branch, "--title", pr_title, "--body", pr_body]
-
-                logger.info(f"Using 'gh' CLI to create PR: {' '.join(pr_command)}")
-                # This command will run in the context of the repo_path.
-                # It might require user interaction if not fully authenticated or if there are conflicts.
-                # For a fully automated system, direct API calls (PyGithub) are better.
-                process = subprocess.run(pr_command, cwd=self.repo_path, capture_output=True, text=True, check=False)
-
-                if process.returncode == 0:
-                    pr_url = process.stdout.strip() # gh pr create usually outputs the URL
-                    logger.info(f"PR created successfully: {pr_url}")
-                    return pr_url
+            pr_title = title
+            if not pr_title:
+                # Get last commit message for title
+                commit_msg_stdout, _, ret_code = self._run_git_command(["log", "-1", "--pretty=%B", branch], raise_on_error=False)
+                if ret_code == 0 and commit_msg_stdout:
+                    pr_title = commit_msg_stdout.splitlines()[0]  # Use first line
                 else:
-                    logger.error(f"'gh pr create' failed: {process.stderr}")
-                    return f"Error opening PR using 'gh' CLI: {process.stderr}. Please open manually."
+                    pr_title = f"Automated PR: Proposed changes from branch {branch}"
+                logger.info(f"Using commit message for PR title: '{pr_title}'")
 
-            except (FileNotFoundError, subprocess.CalledProcessError):
-                logger.warning("'gh' CLI not found or not configured. Please open PR manually.")
-                return f"GitHub token not available and 'gh' CLI failed. Please open PR manually for branch '{branch}' against '{base_branch}'."
+            pr_body_content = body if body else f"Automated PR for changes in branch `{branch}`."
+            # You could add more details to the body, e.g., link to proposal_id if available
 
-        # TODO: Implement GitHub API call using self.github_token
-        return f"Error: PR opening via API not yet implemented. Please open PR for branch '{branch}' manually."
+            # Check if a PR already exists for this branch
+            # Note: PyGithub's get_pulls can be slow on large repos.
+            # A more targeted check might be needed if performance is an issue.
+            open_prs = repo.get_pulls(state='open', head=f'{self.repo_owner}:{branch}')
+            for existing_pr in open_prs:
+                if existing_pr.head.ref == branch and existing_pr.base.ref == base_branch:
+                    logger.warning(f"PR already exists for branch '{branch}' into '{base_branch}': {existing_pr.html_url}")
+                    return existing_pr.html_url, existing_pr.number, f"PR already exists: {existing_pr.html_url}"
+
+            logger.info(f"Creating PR: Title='{pr_title}', Head='{branch}', Base='{base_branch}'")
+            created_pr = repo.create_pull(
+                title=pr_title,
+                body=pr_body_content,
+                head=branch,  # The branch where your changes are
+                base=base_branch  # The branch you want to merge into
+            )
+            logger.info(f"Successfully created PR: {created_pr.html_url} (ID: {created_pr.id}, Number: {created_pr.number})")
+            return created_pr.html_url, created_pr.number, None
+
+        except GithubException as e:
+            logger.error(f"GitHub API error while opening PR for branch '{branch}': {e.status} - {e.data}")
+            # Attempt to parse common errors for more specific messages
+            error_detail = e.data.get('message', str(e))
+            if 'errors' in e.data and e.data['errors']:
+                # Example: "A pull request already exists for <owner>:<branch>."
+                if any("A pull request already exists" in err.get('message', '') for err in e.data['errors']):
+                    logger.warning(f"GitHub indicated a PR already exists for branch '{branch}'. Attempting to find it.")
+                    # Try to find the existing PR again, as the initial check might have missed it due to timing or specific states.
+                    # This part can be complex if the error message doesn't provide a direct link.
+                    # For now, return a generic "already exists" type message.
+                    return None, None, f"Error: {error_detail} (Likely PR already exists for '{branch}')"
+            return None, None, f"GitHub API error: {error_detail}"
+        except Exception as e:
+            logger.error(f"Unexpected error while opening PR for branch '{branch}': {e}", exc_info=True)
+            return None, None, f"Unexpected error: {str(e)}"
 
     # Updated method signature and logic
     def sandbox_test(self, repo_clone_path: str, proposal_id: str) -> tuple[bool, str]:

@@ -164,6 +164,33 @@ Odyssey can connect to Ollama-hosted language models, supporting both a local in
     ```
     Replace `your-remote-ollama-ip` with the actual IP address of your remote Ollama server. If you're only using a local instance, you can leave `OLLAMA_REMOTE_URL` blank or comment it out.
 
+### GitHub Integration for Pull Requests
+For Odyssey to automatically create Pull Requests (PRs) for its proposed code changes, you need to configure GitHub access:
+
+1.  **Generate a GitHub Personal Access Token (PAT):**
+    *   Go to your GitHub settings: [github.com/settings/tokens](https://github.com/settings/tokens).
+    *   Click "Generate new token" (select Classic or Fine-grained).
+        *   **Classic Token:** Give it a descriptive name (e.g., "odyssey-agent-pr"). Select the expiration that suits you. For scopes, you need:
+            *   `repo` (Full control of private repositories) if your target repository is private.
+            *   `public_repo` (Access public repositories) if your target repository is public and you only need to operate on public aspects. For creating PRs, `repo` is generally safer if you might work with private repos or need full capabilities.
+        *   **Fine-grained Token:** Select resource owner, then choose repository access (all or select). For "Repository permissions", you will need at least:
+            *   `Contents: Read and write`
+            *   `Pull requests: Read and write`
+    *   Click "Generate token" and **copy the token immediately**. You won't be able to see it again.
+
+2.  **Set Environment Variables:**
+    In your `.env` file, add the following (using the token you just copied):
+    ```env
+    GITHUB_TOKEN="your_copied_github_personal_access_token"
+    GITHUB_REPO_OWNER="your_github_username_or_organization_name" # e.g., "octocat"
+    GITHUB_REPO_NAME="your_repository_name" # e.g., "odyssey"
+    ```
+    *   `GITHUB_TOKEN`: The PAT you generated.
+    *   `GITHUB_REPO_OWNER`: The username of the account or the name of the organization that owns the repository where PRs will be created.
+    *   `GITHUB_REPO_NAME`: The name of the repository itself.
+
+With these settings, `SelfModifier` will be able to use the GitHub API to create branches and open pull requests.
+
 **API Usage (`/llm/ask`):**
 
 You can send prompts to the LLM via the `/api/v1/llm/ask` endpoint.

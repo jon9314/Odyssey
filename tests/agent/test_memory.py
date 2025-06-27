@@ -50,7 +50,10 @@ class TestMemoryManagerSelfModificationLog(unittest.TestCase):
                     validation_output TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    approved_by TEXT
+                    approved_by TEXT,
+                    pr_url TEXT,
+                    pr_id TEXT,
+                    pr_status TEXT
                 )
             """)
 
@@ -162,6 +165,106 @@ class TestMemoryManagerSelfModificationLog(unittest.TestCase):
         limited_proposals = self.memory.list_proposals(limit=1)
         self.assertEqual(len(limited_proposals), 1)
         self.assertEqual(limited_proposals[0]['proposal_id'], "prop_list_003")
+        self.assertIn('pr_url', limited_proposals[0]) # Check new fields are present even if None
+
+    def test_log_proposal_with_pr_details(self):
+        """Test logging a new proposal step that includes PR details."""
+        proposal_id = "prop_pr_001"
+        branch_name = "feature/with-pr"
+        commit_message = "Proposal with PR info"
+        status = "pr_open"
+        pr_url = "https://github.com/example/repo/pull/123"
+        pr_id = "123"
+        pr_status = "open"
+
+        success = self.memory.log_proposal_step(
+            proposal_id, branch_name, commit_message, status,
+            pr_url=pr_url, pr_id=pr_id, pr_status=pr_status
+        )
+        self.assertTrue(success)
+
+        log_entry = self.memory.get_proposal_log(proposal_id)
+        self.assertIsNotNone(log_entry)
+        self.assertEqual(log_entry['proposal_id'], proposal_id)
+        self.assertEqual(log_entry['branch_name'], branch_name)
+        self.assertEqual(log_entry['status'], status)
+        self.assertEqual(log_entry['pr_url'], pr_url)
+        self.assertEqual(log_entry['pr_id'], pr_id)
+        self.assertEqual(log_entry['pr_status'], pr_status)
+        self.assertIsNotNone(log_entry['created_at'])
+        self.assertIsNotNone(log_entry['updated_at'])
+
+    def test_update_proposal_with_pr_details_later(self):
+        """Test logging a proposal first, then updating it with PR details."""
+        proposal_id = "prop_pr_002"
+        branch_name = "feature/no-pr-yet"
+        commit_message = "Initial commit, no PR"
+        initial_status = "proposed"
+
+        # Log initial proposal without PR info
+        self.memory.log_proposal_step(proposal_id, branch_name, commit_message, initial_status)
+        log_entry_before_pr = self.memory.get_proposal_log(proposal_id)
+        self.assertIsNotNone(log_entry_before_pr)
+        self.assertIsNone(log_entry_before_pr['pr_url'])
+        initial_created_at = log_entry_before_pr['created_at']
+
+        # Now update with PR info
+        updated_status = "pr_open"
+        pr_url = "https://github.com/example/repo/pull/124"
+        pr_id = "124"
+        pr_status = "open"
+
+        success = self.memory.log_proposal_step(
+            proposal_id, branch_name, commit_message, # commit_message could also be updated
+            updated_status,
+            pr_url=pr_url, pr_id=pr_id, pr_status=pr_status
+        )
+        self.assertTrue(success)
+
+        log_entry_after_pr = self.memory.get_proposal_log(proposal_id)
+        self.assertIsNotNone(log_entry_after_pr)
+        self.assertEqual(log_entry_after_pr['status'], updated_status)
+        self.assertEqual(log_entry_after_pr['pr_url'], pr_url)
+        self.assertEqual(log_entry_after_pr['pr_id'], pr_id)
+        self.assertEqual(log_entry_after_pr['pr_status'], pr_status)
+        self.assertEqual(log_entry_after_pr['created_at'], initial_created_at) # Should not change
+        self.assertNotEqual(log_entry_after_pr['updated_at'], log_entry_before_pr['updated_at'])
+
+    def test_update_pr_status_on_existing_proposal(self):
+        """Test updating only the pr_status of a proposal that already has PR info."""
+        proposal_id = "prop_pr_003"
+        branch_name = "feature/pr-status-update"
+        commit_message = "PR status will change"
+        initial_pr_url = "https://github.com/example/repo/pull/125"
+        initial_pr_id = "125"
+        initial_pr_status = "open"
+
+        # Log initial proposal with PR info
+        self.memory.log_proposal_step(
+            proposal_id, branch_name, commit_message, "pr_open",
+            pr_url=initial_pr_url, pr_id=initial_pr_id, pr_status=initial_pr_status
+        )
+
+        log_entry_before_update = self.memory.get_proposal_log(proposal_id)
+
+        # Now update only the pr_status (and main status)
+        updated_main_status = "pr_merged" # Example main status change
+        updated_pr_status = "merged"
+
+        success = self.memory.log_proposal_step(
+            proposal_id, branch_name, commit_message,
+            updated_main_status, # Main status
+            pr_status=updated_pr_status # Only PR status updated, URL and ID should persist
+        )
+        self.assertTrue(success)
+
+        log_entry_after_update = self.memory.get_proposal_log(proposal_id)
+        self.assertIsNotNone(log_entry_after_update)
+        self.assertEqual(log_entry_after_update['status'], updated_main_status)
+        self.assertEqual(log_entry_after_update['pr_url'], initial_pr_url) # Should persist
+        self.assertEqual(log_entry_after_update['pr_id'], initial_pr_id) # Should persist
+        self.assertEqual(log_entry_after_update['pr_status'], updated_pr_status) # Should update
+        self.assertNotEqual(log_entry_after_update['updated_at'], log_entry_before_update['updated_at'])
 
 
     def test_log_proposal_step_db_error(self):

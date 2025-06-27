@@ -75,6 +75,9 @@ class AppSettings(BaseSettings):
     # SelfModifier settings
     repo_path: str = "." # Default to current directory, can be overridden by env
     SELF_MOD_APPROVAL_MODE: str = "manual" # Options: 'manual' (default), 'auto'
+    GITHUB_TOKEN: Optional[str] = None
+    GITHUB_REPO_OWNER: Optional[str] = None
+    GITHUB_REPO_NAME: Optional[str] = None
 
     # Sandbox settings
     SANDBOX_HEALTH_CHECK_ENDPOINT: str = "/health"
@@ -171,8 +174,14 @@ async def lifespan(app_instance: FastAPI): # Renamed app to app_instance to avoi
     get_tool_manager_dependency.instance = app_state.tool_manager
 
     # SelfModifier
-    app_state.self_modifier = SelfModifier(repo_path=app_state.settings.repo_path)
-    logger.info(f"SelfModifier initialized for repo path: {app_state.settings.repo_path}")
+    app_state.self_modifier = SelfModifier(
+        repo_path=app_state.settings.repo_path,
+        github_token=app_state.settings.GITHUB_TOKEN,
+        repo_owner=app_state.settings.GITHUB_REPO_OWNER,
+        repo_name=app_state.settings.GITHUB_REPO_NAME
+        # sandbox_manager will be set later if needed by SelfModifier, or passed here
+    )
+    logger.info(f"SelfModifier initialized for repo path: {app_state.settings.repo_path}, Owner: {app_state.settings.GITHUB_REPO_OWNER}, Repo: {app_state.settings.GITHUB_REPO_NAME}")
     get_self_modifier_dependency.instance = app_state.self_modifier
 
     # logger.info("Placeholder: Initialize Planner")

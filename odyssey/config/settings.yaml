@@ -47,6 +47,12 @@ memory:
 # Logging
 logging:
   level: "INFO" # DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+# GitHub Integration (for SelfModifier PRs)
+# These are typically set in .env file and loaded by AppSettings
+# GITHUB_TOKEN: "your_github_personal_access_token"
+# GITHUB_REPO_OWNER: "your_github_username_or_org"
+# GITHUB_REPO_NAME: "your_repository_name"
   file: "logs/odyssey_agent.log"
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
