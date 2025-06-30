@@ -3,8 +3,8 @@ version: '3.8'
 services:
   backend:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ./odyssey # Changed context to odyssey subdirectory
+      dockerfile: Dockerfile # Dockerfile is inside ./odyssey
     container_name: odyssey_backend
     restart: unless-stopped # Good for development, consider 'always' or specific policies for prod
     ports:
@@ -131,7 +131,7 @@ services:
 
   celery_worker:
     build:
-      context: .
+      context: ./odyssey # Changed context to odyssey subdirectory
       dockerfile: Dockerfile # Uses the same Dockerfile as backend
     container_name: odyssey_celery_worker
     restart: unless-stopped
