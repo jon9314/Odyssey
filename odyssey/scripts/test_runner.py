@@ -5,7 +5,7 @@ import subprocess
 import importlib
 
 # Add project root to sys.path to allow importing odyssey modules
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, PROJECT_ROOT)
 
 # Attempt to import the sandbox; handle if it's not found or has issues

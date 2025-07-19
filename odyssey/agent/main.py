@@ -339,4 +339,3 @@ if __name__ == "__main__":
 # unless FastAPI is configured to do so (which is not the default setup implied by the separate frontend service).
 # The comment "Starts the Odyssey backend and web interface" in the original description might mean
 # it's the entry point for the *project's backend services*, which the web interface then consumes.
-```
