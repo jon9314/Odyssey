@@ -281,4 +281,3 @@ class ToolManager:
 # during automated testing. Individual tools have their own test blocks,
 # and ToolManager functionality will be tested via integration tests
 # or by running the main application and using its API endpoints.
-```

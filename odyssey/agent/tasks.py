@@ -253,7 +253,7 @@ def run_sandbox_validation_task(self, proposal_id: str, branch_name: str) -> Dic
         # 3. Fetch and checkout the specific proposal branch
         logger.info(f"{log_prefix} Fetching and checking out branch '{branch_name}' in temporary clone.")
 
-import shlex # For parsing command strings safely
+        import shlex  # For parsing command strings safely
 
         # Initialize SelfModifier with the path to the temporary clone.
         # Also pass the sandbox_manager instance to this SelfModifier, configured from AppSettings.
@@ -496,4 +496,3 @@ def merge_approved_proposal_task(self, proposal_id: str) -> Dict[str, Any]: # Re
         if memory:
             memory.close()
             logger.debug(f"{log_prefix} MemoryManager closed.")
-```

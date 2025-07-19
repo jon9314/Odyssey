@@ -349,4 +349,3 @@ if __name__ == "__main__":
             logger.warning("Langfuse client not active. Example operations were skipped.")
 
     logger.info("LangfuseClientWrapper example finished.")
-```

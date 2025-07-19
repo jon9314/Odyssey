@@ -127,4 +127,3 @@ if __name__ == '__main__':
     logger.info("Celery app `odyssey.agent.celery_app` is defined.")
     logger.info("To start a worker from project root: `celery -A odyssey.agent.celery_app worker -l INFO -Q default`")
     logger.info("Ensure your broker (Valkey/Redis) is running and configured in .env or settings.")
-```
